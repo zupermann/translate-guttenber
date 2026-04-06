@@ -1,10 +1,34 @@
 """Ollama API client and translation logic."""
 
+import json
+import logging
+import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Dict, Optional
 
 import requests
+
+
+# Setup persistent debug logging
+LOG_DIR = os.path.expanduser("~/.local/share/translate-book")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "translation.log")
+
+# Configure logger
+logger = logging.getLogger("translate_book")
+logger.setLevel(logging.DEBUG)
+
+# File handler for persistent logging
+file_handler = logging.FileHandler(LOG_FILE, mode='a')
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)
 
 
 # Retry configuration
@@ -30,15 +54,18 @@ class OllamaTranslator:
     SYSTEM_PROMPT = """You are a professional English (en) to Romanian (ro) translator.
 Your goal is to accurately convey the meaning and nuances of the original English text
 while adhering to Romanian grammar, vocabulary, and cultural sensitivities.
-Produce only the Romanian translation, without any additional explanations or commentary.
-Proper nouns, character names, place names, and author-invented names must remain
-in their original English form. Do not translate them."""
 
-    USER_PROMPT_TEMPLATE = "Please translate the following English text into Romanian:\n\n{text}"
-    USER_PROMPT_WITH_DELIMITER = """Please translate the following English text into Romanian.
-Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same positions.
+CRITICAL RULES:
+1. Produce ONLY the Romanian translation. No explanations, no commentary.
+2. Proper nouns, names, and places must remain in English.
+3. When text contains ｜｜｜ delimiters, preserve them in the exact same positions in your output.
+4. Do NOT translate these instructions. Do NOT echo the input text.
 
-{text}"""
+Output format: Only the translated text."""
+
+    USER_PROMPT_TEMPLATE = "TEXT TO TRANSLATE:\n{text}\n\nROMANIAN TRANSLATION:"
+
+    USER_PROMPT_WITH_DELIMITER = "TEXT TO TRANSLATE (preserve ｜｜｜ delimiters):\n{text}\n\nROMANIAN TRANSLATION:"
 
     def __init__(
         self,
@@ -118,14 +145,22 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
         last_error = None
         start_time = time.time()
 
+        logger.info(f"TRANSLATE START: has_delimiters={has_delimiters}")
+        logger.debug(f"TRANSLATE INPUT: {repr(text)}")
+
         for attempt in range(MAX_RETRIES):
 
             try:
                 messages = self._build_messages(text, has_delimiters)
+                logger.debug(f"TRANSLATE MESSAGES: {json.dumps(messages, ensure_ascii=False)}")
+
                 response_data = self._call_api(messages)
 
                 raw_response = response_data['message']['content']
+                logger.debug(f"TRANSLATE RAW RESPONSE: {repr(raw_response)}")
+
                 cleaned = self._clean_response(raw_response)
+                logger.info(f"TRANSLATE CLEANED: {repr(cleaned[:200])}...")
 
                 duration = time.time() - start_time
 
@@ -219,15 +254,22 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
         Returns:
             TranslationResult with correct delimiter count, or success=False if retry fails
         """
+        logger.info(f"DELIMITER_RETRY START: expected={expected_delimiter_count}, text={repr(text[:100])}...")
         start_time = time.time()
 
         # First attempt
         result = self.translate(text, has_delimiters=True)
         if not result.success:
+            logger.warning(f"DELIMITER_RETRY: First attempt failed: {result.error_message}")
             return result
 
-        if result.translated_text.count(delimiter) == expected_delimiter_count:
+        actual_count = result.translated_text.count(delimiter)
+        if actual_count == expected_delimiter_count:
+            logger.info(f"DELIMITER_RETRY: Success on first attempt")
             return result
+
+        logger.warning(f"DELIMITER_RETRY: First attempt delimiter mismatch. Expected {expected_delimiter_count}, got {actual_count}")
+        logger.debug(f"DELIMITER_RETRY: First attempt result: {repr(result.translated_text)}")
 
         # Delimiter mismatch - retry with explicit correction instruction
         retry_messages = [
@@ -241,28 +283,36 @@ Your response must contain exactly {expected_delimiter_count} {delimiter} delimi
 Please translate again, keeping {delimiter} delimiters in the exact same positions:"""},
         ]
 
+        logger.debug(f"DELIMITER_RETRY MESSAGES: {json.dumps(retry_messages, ensure_ascii=False)}")
+
         try:
-            retry_result = self._call_api(retry_messages)
-            cleaned = self._clean_response(retry_result['message']['content'])
+            retry_api_result = self._call_api(retry_messages)
+            cleaned = self._clean_response(retry_api_result['message']['content'])
+            logger.debug(f"DELIMITER_RETRY RAW: {repr(retry_api_result['message']['content'])}")
+            logger.info(f"DELIMITER_RETRY CLEANED: {repr(cleaned[:200])}...")
         except (requests.exceptions.RequestException, KeyError, ValueError) as e:
+            logger.error(f"DELIMITER_RETRY: Retry API call failed: {e}")
             return TranslationResult(
                 translated_text=text,
                 success=False,
                 error_message=f"Delimiter retry API call failed: {e}",
             )
 
-        if cleaned.count(delimiter) != expected_delimiter_count:
+        retry_actual_count = cleaned.count(delimiter)
+        if retry_actual_count != expected_delimiter_count:
             # Retry failed to fix delimiters
+            logger.error(f"DELIMITER_RETRY FAILED: After retry, expected {expected_delimiter_count}, got {retry_actual_count}")
             return TranslationResult(
                 translated_text=text,  # Return original
                 success=False,
-                error_message=f"Delimiter mismatch after retry: expected {expected_delimiter_count}, got {cleaned.count(delimiter)}",
+                error_message=f"Delimiter mismatch after retry: expected {expected_delimiter_count}, got {retry_actual_count}",
             )
 
+        logger.info(f"DELIMITER_RETRY: Success after retry")
         return TranslationResult(
             translated_text=cleaned,
-            prompt_tokens=retry_result.get('prompt_eval_count', 0),
-            output_tokens=retry_result.get('eval_count', 0),
+            prompt_tokens=retry_api_result.get('prompt_eval_count', 0),
+            output_tokens=retry_api_result.get('eval_count', 0),
             duration_seconds=time.time() - start_time,
             retries=1,
             success=True,
