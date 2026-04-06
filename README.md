@@ -22,7 +22,8 @@ Run the install script to set up the alias:
 This will:
 - Check dependencies
 - Create a `translate-book` alias in your `.bashrc`
-- Source the updated `.bashrc`
+
+After running the script, open a new terminal or run `source ~/.bashrc` to use the alias.
 
 ## Requirements
 
@@ -92,8 +93,8 @@ pandoc translated_book.html -o translated_book.epub --metadata title="Book Title
 # Install dependencies
 pip install -r requirements.txt
 
-# Run tests
-python3 -m pytest tests/
+# Run translation
+python3 translate_book.py book.html
 ```
 
 ## License

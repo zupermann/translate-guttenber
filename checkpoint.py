@@ -1,9 +1,10 @@
 """Checkpoint read/write for resumable translations."""
 
-import json
 import hashlib
+import json
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Set
 
 
 class Checkpoint:
@@ -31,6 +32,8 @@ class Checkpoint:
             "translations": {},
             "last_updated": None,
         }
+        # Maintain set for O(1) membership checks
+        self._completed_set: Set[int] = set()
 
     def _hash_file(self, file_path: Path) -> str:
         """Compute SHA256 hash of file contents."""
@@ -69,6 +72,8 @@ class Checkpoint:
                 print(f"  Current model: {self.model}")
 
             self.data = loaded_data
+            # Populate set for O(1) lookups
+            self._completed_set = set(self.data.get("completed", []))
             return True
 
         except (json.JSONDecodeError, IOError) as e:
@@ -86,10 +91,9 @@ class Checkpoint:
             translated_text: The translated text
             total_chunks: Total number of chunks
         """
-        from datetime import datetime
-
-        # Update data
-        if chunk_index not in self.data["completed"]:
+        # Update data and set
+        if chunk_index not in self._completed_set:
+            self._completed_set.add(chunk_index)
             self.data["completed"].append(chunk_index)
         self.data["translations"][str(chunk_index)] = translated_text
         self.data["total_chunks"] = total_chunks
@@ -109,7 +113,7 @@ class Checkpoint:
 
     def is_done(self, chunk_index: int) -> bool:
         """Return True if chunk_index is in completed list."""
-        return chunk_index in self.data["completed"]
+        return chunk_index in self._completed_set
 
     def get_translation(self, chunk_index: int) -> Optional[str]:
         """Return cached translation for chunk_index, or None."""

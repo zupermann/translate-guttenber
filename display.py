@@ -2,7 +2,6 @@
 
 import sys
 import textwrap
-from typing import Optional
 
 try:
     from tqdm import tqdm
@@ -142,7 +141,7 @@ class Display:
             text,
             width=wrap_width,
             replace_whitespace=False,
-            drop_whitespace=False
+            drop_whitespace=True
         )
 
         # Add prefix to each line

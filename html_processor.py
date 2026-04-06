@@ -47,34 +47,35 @@ class HTMLProcessor:
         self.chunks = []
         chunk_index = 0
 
-        # Walk all elements in document order
-        for element in self.soup.find_all(True):
-            if not isinstance(element, Tag):
-                continue
+        try:
+            # Walk all elements in document order
+            for element in self.soup.find_all(True):
+                if not isinstance(element, Tag):
+                    continue
 
-            # Skip if not translatable
-            if not self._is_translatable_element(element):
-                continue
+                # Skip if not translatable
+                if not self._is_translatable_element(element):
+                    continue
 
-            # Skip if in a skip zone
-            if self._is_in_skip_zone(element):
-                continue
+                # Skip if in a skip zone
+                if self._is_in_skip_zone(element):
+                    continue
 
-            # Skip if already processed (avoid double-processing nested blocks)
-            if element.get('data-chunk-processed'):
-                continue
+                # Skip if already processed (avoid double-processing nested blocks)
+                if element.get('data-chunk-processed'):
+                    continue
 
-            # Build chunk for this element
-            chunk = self._build_chunk(element, chunk_index)
-            if chunk:
-                self.chunks.append(chunk)
-                chunk_index += 1
-                # Mark element as processed
-                element['data-chunk-processed'] = 'true'
-
-        # Clean up processing markers
-        for element in self.soup.find_all(attrs={'data-chunk-processed': True}):
-            del element['data-chunk-processed']
+                # Build chunk for this element
+                chunk = self._build_chunk(element, chunk_index)
+                if chunk:
+                    self.chunks.append(chunk)
+                    chunk_index += 1
+                    # Mark element as processed
+                    element['data-chunk-processed'] = 'true'
+        finally:
+            # Clean up processing markers (exception-safe)
+            for element in self.soup.find_all(attrs={'data-chunk-processed': True}):
+                del element['data-chunk-processed']
 
         return self.chunks
 
@@ -170,8 +171,12 @@ class HTMLProcessor:
         if len(segments) == 1:
             plain_text = str(segments[0]).strip()
         else:
-            has_inline_tags = True
-            plain_text = f" {DELIMITER} ".join(str(seg).strip() for seg in segments if str(seg).strip())
+            # Only use delimiters if we actually detected inline tags
+            if has_inline_tags:
+                plain_text = f" {DELIMITER} ".join(str(seg).strip() for seg in segments if str(seg).strip())
+            else:
+                # Multiple segments but no inline tags - join without delimiters
+                plain_text = " ".join(str(seg).strip() for seg in segments)
 
         return Chunk(
             index=index,
@@ -188,21 +193,22 @@ class HTMLProcessor:
           - If has_inline_tags: split on delimiter, map back to segment list.
             On mismatch: fallback strategy (replace first segment, clear others).
         """
+        # Build lookup dict for O(1) access
+        chunk_map = {c.index: c for c in self.chunks}
+
         for chunk_index, translated_text in translations.items():
             # Find the chunk
-            chunk = None
-            for c in self.chunks:
-                if c.index == chunk_index:
-                    chunk = c
-                    break
-
+            chunk = chunk_map.get(chunk_index)
             if not chunk:
                 continue
 
             if not chunk.has_inline_tags:
-                # Simple case: single segment
+                # Simple case: no inline tags, but may have multiple segments
                 if chunk.segments:
                     chunk.segments[0].replace_with(translated_text)
+                    # Clear any remaining segments (e.g., whitespace splits)
+                    for segment in chunk.segments[1:]:
+                        segment.replace_with('')
             else:
                 # Complex case: multiple segments with delimiter
                 if translated_text.count(DELIMITER) == len(chunk.segments) - 1:

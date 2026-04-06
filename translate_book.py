@@ -9,6 +9,7 @@ and writes a translated HTML output file.
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,8 +26,8 @@ def notify_telegram(message: str) -> None:
     """Send a Telegram notification using the system alias."""
     try:
         subprocess.run(
-            ['~/.local/bin/telegram-notify', message],
-            shell=True,
+            [os.path.expanduser('~/.local/bin/telegram-notify'), message],
+            shell=False,
             check=False,
             capture_output=True
         )
@@ -117,9 +118,9 @@ Examples:
 
     parser.add_argument(
         "--skip-boilerplate",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Auto-detect and skip Gutenberg header/footer boilerplate (default: on)"
+        help="Auto-detect and skip Gutenberg header/footer boilerplate (default: --skip-boilerplate)"
     )
 
     parser.add_argument(
@@ -153,15 +154,16 @@ def main() -> int:
     if args.input_file.suffix.lower() not in ('.html', '.htm'):
         print(f"Warning: Input file does not have .html/.htm extension: {args.input_file}", file=sys.stderr)
 
+    # Compute input stem once for reuse
+    input_stem = args.input_file.stem
+
     # 2. Resolve output path (default: same dir, _ro suffix)
     if args.output is None:
-        input_stem = args.input_file.stem
         output_name = f"{input_stem}_ro.html"
         args.output = args.input_file.parent / output_name
 
     # 3. Resolve checkpoint path
     if args.checkpoint is None:
-        input_stem = args.input_file.stem
         checkpoint_name = f"{input_stem}_checkpoint.json"
         args.checkpoint = args.input_file.parent / checkpoint_name
 
@@ -237,13 +239,6 @@ def main() -> int:
     # 11. Initialize Display(total=len(chunks), debug=args.debug)
     display = Display(total_chunks=len(chunks), debug=args.debug)
 
-    def check_delimiters(text: str, expected_count: int) -> bool:
-        """Check if text has correct number of delimiter markers."""
-        if expected_count == 0:
-            return True
-        actual = text.count(DELIMITER)
-        return actual == expected_count
-
     # 12. Main translation loop
     translations: Dict[int, str] = {}
 
@@ -258,47 +253,36 @@ def main() -> int:
             # Calculate expected delimiter count
             expected_delimiters = len(chunk.segments) - 1 if chunk.has_inline_tags else 0
 
-            # Translate
-            result = translator.translate(
-                text=chunk.plain_text,
-                has_delimiters=chunk.has_inline_tags
-            )
-
-            # Check delimiter preservation for chunks with inline tags
-            if chunk.has_inline_tags and not check_delimiters(result.translated_text, expected_delimiters):
-                print(f"\nWarning: Chunk {chunk.index} delimiter mismatch. Retrying with explicit instruction...", file=sys.stderr)
-
-                # Retry with explicit error correction prompt
-                retry_text = f"""Your previous translation did not preserve the {DELIMITER} delimiters correctly.
-The source had {len(chunk.segments)} text segments separated by {DELIMITER}.
-Your translation must have exactly the same number of {DELIMITER} delimiters in the same positions.
-
-Source text:
-{chunk.plain_text}
-
-Please translate again, keeping the {DELIMITER} delimiters exactly as-is:"""
-
-                retry_result = translator.translate(
-                    text=retry_text,
-                    has_delimiters=False  # Don't add delimiter instruction again
+            # Translate (with delimiter retry if needed)
+            if chunk.has_inline_tags and expected_delimiters > 0:
+                result = translator.translate_with_delimiter_retry(
+                    text=chunk.plain_text,
+                    expected_delimiter_count=expected_delimiters,
+                    delimiter=DELIMITER
+                )
+            else:
+                result = translator.translate(
+                    text=chunk.plain_text,
+                    has_delimiters=False
                 )
 
-                # Verify retry
-                if not check_delimiters(retry_result.translated_text, expected_delimiters):
-                    # Fatal error - stop for manual review
-                    msg = f"Translation FAILED: Delimiter mismatch in {args.input_file.name} at chunk {chunk.index}. Manual review required."
-                    print(f"\n\nERROR: Chunk {chunk.index} delimiter mismatch after retry.", file=sys.stderr)
-                    print(f"Expected {expected_delimiters} delimiters, got {retry_result.translated_text.count(DELIMITER)}", file=sys.stderr)
-                    print(f"\nSource: {chunk.plain_text}", file=sys.stderr)
-                    print(f"\nTranslation: {retry_result.translated_text}", file=sys.stderr)
-                    print(f"\nProgress saved to checkpoint. Manual review required.", file=sys.stderr)
-                    print(f"Resume with: python {sys.argv[0]} {args.input_file} --resume", file=sys.stderr)
-                    display.close()
-                    notify_telegram(msg)
-                    return 1
-
-                # Use retry result
-                result = retry_result
+            # Check for translation failure
+            if not result.success:
+                print(f"\nWarning: Chunk {chunk.index} translation failed after all retries.", file=sys.stderr)
+                print(f"Error: {result.error_message or 'Unknown error'}", file=sys.stderr)
+                print(f"Source text kept as-is. Continuing with next chunk.", file=sys.stderr)
+                # Still save the result (which is source text) to checkpoint so we don't retry
+                translations[chunk.index] = result.translated_text
+                checkpoint.save(chunk.index, result.translated_text, len(chunks))
+                display.update(
+                    chunk_index=chunk.index,
+                    element_type=chunk.element_type,
+                    source_text=chunk.plain_text,
+                    translated_text=result.translated_text,
+                    duration=result.duration_seconds,
+                    tokens=result.output_tokens
+                )
+                continue
 
             translations[chunk.index] = result.translated_text
 

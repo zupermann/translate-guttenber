@@ -21,6 +21,7 @@ class TranslationResult:
     duration_seconds: float = 0.0
     retries: int = 0
     success: bool = True  # False if all retries exhausted; translated_text = source text
+    error_message: Optional[str] = None  # Error message if success=False
 
 
 class OllamaTranslator:
@@ -72,7 +73,7 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
             models = data.get('models', [])
             model_names = [m.get('name', '') for m in models]
 
-            # Check for exact match or model without tag
+            # Check for exact match
             if self.model not in model_names:
                 # Check if model exists with different tag
                 model_base = self.model.split(':')[0]
@@ -83,9 +84,14 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
                         f"Model '{self.model}' not found. "
                         f"Available models: {', '.join(model_names[:10])}"
                     )
-                elif self.model not in model_names:
-                    # Model exists with different tag, that's okay
-                    pass
+                else:
+                    # Model exists with different tag - warn but continue
+                    import sys
+                    print(
+                        f"Warning: Model '{self.model}' not found exactly. "
+                        f"Found: {available_models[0]}. Continuing with configured model name.",
+                        file=sys.stderr
+                    )
 
         except requests.exceptions.ConnectionError as e:
             raise ConnectionError(
@@ -110,9 +116,9 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
         """
         source_text = text
         last_error = None
+        start_time = time.time()
 
         for attempt in range(MAX_RETRIES):
-            start_time = time.time()
 
             try:
                 messages = self._build_messages(text, has_delimiters)
@@ -152,11 +158,13 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
                 break
 
         # All retries failed
+        error_msg = str(last_error) if last_error else "All retries failed"
         return TranslationResult(
             translated_text=source_text,  # Return source text as fallback
             duration_seconds=time.time() - start_time,
             retries=MAX_RETRIES - 1,
             success=False,
+            error_message=error_msg,
         )
 
     def _build_messages(self, text: str, has_delimiters: bool) -> List[Dict[str, str]]:
@@ -195,6 +203,69 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
         )
         response.raise_for_status()
         return response.json()
+
+    def translate_with_delimiter_retry(
+        self, text: str, expected_delimiter_count: int, delimiter: str
+    ) -> TranslationResult:
+        """
+        Translate with delimiter preservation, retrying once if delimiter count is wrong.
+
+        Args:
+            text: Text with delimiters to translate
+            expected_delimiter_count: Expected number of delimiters in output
+            delimiter: The delimiter string to preserve
+
+        Returns:
+            TranslationResult with correct delimiter count, or success=False if retry fails
+        """
+        start_time = time.time()
+
+        # First attempt
+        result = self.translate(text, has_delimiters=True)
+        if not result.success:
+            return result
+
+        if result.translated_text.count(delimiter) == expected_delimiter_count:
+            return result
+
+        # Delimiter mismatch - retry with explicit correction instruction
+        retry_messages = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": self.USER_PROMPT_TEMPLATE.format(text=text)},
+            {"role": "assistant", "content": result.translated_text},
+            {"role": "user", "content": f"""Your translation did not preserve the {delimiter} delimiters correctly.
+The source had {expected_delimiter_count + 1} text segments separated by {delimiter}.
+Your response must contain exactly {expected_delimiter_count} {delimiter} delimiters.
+
+Please translate again, keeping {delimiter} delimiters in the exact same positions:"""},
+        ]
+
+        try:
+            retry_result = self._call_api(retry_messages)
+            cleaned = self._clean_response(retry_result['message']['content'])
+        except (requests.exceptions.RequestException, KeyError, ValueError) as e:
+            return TranslationResult(
+                translated_text=text,
+                success=False,
+                error_message=f"Delimiter retry API call failed: {e}",
+            )
+
+        if cleaned.count(delimiter) != expected_delimiter_count:
+            # Retry failed to fix delimiters
+            return TranslationResult(
+                translated_text=text,  # Return original
+                success=False,
+                error_message=f"Delimiter mismatch after retry: expected {expected_delimiter_count}, got {cleaned.count(delimiter)}",
+            )
+
+        return TranslationResult(
+            translated_text=cleaned,
+            prompt_tokens=retry_result.get('prompt_eval_count', 0),
+            output_tokens=retry_result.get('eval_count', 0),
+            duration_seconds=time.time() - start_time,
+            retries=1,
+            success=True,
+        )
 
     def _clean_response(self, raw: str) -> str:
         """
