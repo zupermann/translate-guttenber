@@ -1,0 +1,7 @@
+#!/bin/bash
+# Wrapper script for translate-book
+# Activates venv and runs the Python script
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/venv/bin/activate"
+python3 "$SCRIPT_DIR/translate_book.py" "$@"

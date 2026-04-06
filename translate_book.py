@@ -12,8 +12,11 @@ import argparse
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict
+
+from html_processor import Chunk
 
 from html_processor import HTMLProcessor, DELIMITER
 from translator import OllamaTranslator
@@ -129,12 +132,50 @@ Examples:
         help="Overwrite output file without prompting"
     )
 
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=2,
+        help="Number of parallel translation workers. Default: 2"
+    )
+
     return parser
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count using word count heuristic."""
     return int(len(text.split()) * 1.3)
+
+
+def translate_chunk(chunk: Chunk, translator: OllamaTranslator, delimiter: str):
+    """
+    Translate a single chunk. Used by ThreadPoolExecutor.
+
+    Args:
+        chunk: The chunk to translate
+        translator: The translator instance
+        delimiter: The delimiter string for inline tags
+
+    Returns:
+        tuple: (chunk, result) where result is TranslationResult
+    """
+    from translator import TranslationResult
+
+    expected_delimiters = len(chunk.segments) - 1 if chunk.has_inline_tags else 0
+
+    if chunk.has_inline_tags and expected_delimiters > 0:
+        result = translator.translate_with_delimiter_retry(
+            text=chunk.plain_text,
+            expected_delimiter_count=expected_delimiters,
+            delimiter=delimiter
+        )
+    else:
+        result = translator.translate(
+            text=chunk.plain_text,
+            has_delimiters=False
+        )
+
+    return chunk, result
 
 
 def main() -> int:
@@ -239,39 +280,47 @@ def main() -> int:
     # 11. Initialize Display(total=len(chunks), debug=args.debug)
     display = Display(total_chunks=len(chunks), debug=args.debug)
 
-    # 12. Main translation loop
+    # 12. Main translation loop with parallel execution
     translations: Dict[int, str] = {}
 
+    # Get list of pending chunks (not already done)
+    pending = [c for c in chunks if not checkpoint.is_done(c.index)]
+
+    # Load cached chunks into translations dict first
+    for chunk in chunks:
+        if checkpoint.is_done(chunk.index):
+            translations[chunk.index] = checkpoint.get_translation(chunk.index)
+            display.update_cached(chunk.index)
+
+    shutdown_requested = False
+
     try:
-        for chunk in chunks:
-            # Check if already done in checkpoint
-            if checkpoint.is_done(chunk.index):
-                translations[chunk.index] = checkpoint.get_translation(chunk.index)
-                display.update_cached(chunk.index)
-                continue
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            # Submit all pending chunks
+            futures = {
+                executor.submit(translate_chunk, chunk, translator, DELIMITER): chunk
+                for chunk in pending
+            }
 
-            # Calculate expected delimiter count
-            expected_delimiters = len(chunk.segments) - 1 if chunk.has_inline_tags else 0
+            # Process results as they complete
+            for future in as_completed(futures):
+                if shutdown_requested:
+                    break
 
-            # Translate (with delimiter retry if needed)
-            if chunk.has_inline_tags and expected_delimiters > 0:
-                result = translator.translate_with_delimiter_retry(
-                    text=chunk.plain_text,
-                    expected_delimiter_count=expected_delimiters,
-                    delimiter=DELIMITER
-                )
-            else:
-                result = translator.translate(
-                    text=chunk.plain_text,
-                    has_delimiters=False
-                )
+                chunk = futures[future]
+                try:
+                    _, result = future.result()
+                except Exception as e:
+                    from translator import TranslationResult
+                    result = TranslationResult(
+                        translated_text=chunk.plain_text,
+                        success=False,
+                        error_message=str(e)
+                    )
 
-            # Check for translation failure
-            if not result.success:
-                print(f"\nWarning: Chunk {chunk.index} translation failed after all retries.", file=sys.stderr)
-                print(f"Error: {result.error_message or 'Unknown error'}", file=sys.stderr)
-                print(f"Source text kept as-is. Continuing with next chunk.", file=sys.stderr)
-                # Still save the result (which is source text) to checkpoint so we don't retry
+                if not result.success:
+                    print(f"\nWarning: Chunk {chunk.index} failed: {result.error_message}", file=sys.stderr)
+
                 translations[chunk.index] = result.translated_text
                 checkpoint.save(chunk.index, result.translated_text, len(chunks))
                 display.update(
@@ -282,27 +331,11 @@ def main() -> int:
                     duration=result.duration_seconds,
                     tokens=result.output_tokens
                 )
-                continue
-
-            translations[chunk.index] = result.translated_text
-
-            # Save checkpoint
-            checkpoint.save(chunk.index, result.translated_text, len(chunks))
-
-            # Update display
-            display.update(
-                chunk_index=chunk.index,
-                element_type=chunk.element_type,
-                source_text=chunk.plain_text,
-                translated_text=result.translated_text,
-                duration=result.duration_seconds,
-                tokens=result.output_tokens
-            )
 
     except KeyboardInterrupt:
-        msg = f"Translation PAUSED: {args.input_file.name} interrupted by user. Resume with --resume."
-        print("\n\nInterrupted! Progress has been saved to checkpoint.", file=sys.stderr)
-        print(f"Resume with: python {sys.argv[0]} {args.input_file} --resume", file=sys.stderr)
+        shutdown_requested = True
+        msg = f"Translation PAUSED: {args.input_file.name} interrupted. Resume with --resume."
+        print("\n\nInterrupted! Progress saved to checkpoint.", file=sys.stderr)
         display.close()
         notify_telegram(msg)
         return 130

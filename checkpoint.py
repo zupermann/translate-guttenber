@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -34,6 +35,8 @@ class Checkpoint:
         }
         # Maintain set for O(1) membership checks
         self._completed_set: Set[int] = set()
+        # Threading lock for thread-safe operations
+        self._lock = threading.Lock()
 
     def _hash_file(self, file_path: Path) -> str:
         """Compute SHA256 hash of file contents."""
@@ -91,33 +94,36 @@ class Checkpoint:
             translated_text: The translated text
             total_chunks: Total number of chunks
         """
-        # Update data and set
-        if chunk_index not in self._completed_set:
-            self._completed_set.add(chunk_index)
-            self.data["completed"].append(chunk_index)
-        self.data["translations"][str(chunk_index)] = translated_text
-        self.data["total_chunks"] = total_chunks
-        self.data["last_updated"] = datetime.now().isoformat()
+        with self._lock:
+            # Update data and set
+            if chunk_index not in self._completed_set:
+                self._completed_set.add(chunk_index)
+                self.data["completed"].append(chunk_index)
+            self.data["translations"][str(chunk_index)] = translated_text
+            self.data["total_chunks"] = total_chunks
+            self.data["last_updated"] = datetime.now().isoformat()
 
-        # Atomic write
-        tmp_path = self.path.with_suffix('.tmp')
-        try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
-            tmp_path.rename(self.path)
-        except Exception:
-            # Clean up temp file on error
-            if tmp_path.exists():
-                tmp_path.unlink()
-            raise
+            # Atomic write
+            tmp_path = self.path.with_suffix('.tmp')
+            try:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                tmp_path.rename(self.path)
+            except Exception:
+                # Clean up temp file on error
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                raise
 
     def is_done(self, chunk_index: int) -> bool:
         """Return True if chunk_index is in completed list."""
-        return chunk_index in self._completed_set
+        with self._lock:
+            return chunk_index in self._completed_set
 
     def get_translation(self, chunk_index: int) -> Optional[str]:
         """Return cached translation for chunk_index, or None."""
-        return self.data["translations"].get(str(chunk_index))
+        with self._lock:
+            return self.data["translations"].get(str(chunk_index))
 
     def completed_count(self) -> int:
         """Return number of completed chunks."""

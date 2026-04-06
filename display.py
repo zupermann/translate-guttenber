@@ -2,6 +2,7 @@
 
 import sys
 import textwrap
+import threading
 
 try:
     from tqdm import tqdm
@@ -27,6 +28,7 @@ class Display:
         self.total_tokens = 0
         self.total_seconds = 0.0
         self._pbar = None
+        self._lock = threading.Lock()
 
         if TQDM_AVAILABLE:
             self._pbar = tqdm(
@@ -49,29 +51,30 @@ class Display:
             duration: Time taken for this chunk
             tokens: Number of tokens processed
         """
-        self.completed += 1
-        self.total_seconds += duration
-        self.total_tokens += tokens
+        with self._lock:
+            self.completed += 1
+            self.total_seconds += duration
+            self.total_tokens += tokens
 
-        # Print debug output before updating bar
-        if self.debug:
-            debug_block = self._format_debug_block(
-                chunk_index, element_type, source_text,
-                translated_text, tokens, duration
-            )
+            # Print debug output before updating bar
+            if self.debug:
+                debug_block = self._format_debug_block(
+                    chunk_index, element_type, source_text,
+                    translated_text, tokens, duration
+                )
+                if TQDM_AVAILABLE and self._pbar:
+                    from tqdm import tqdm as tqdm_class
+                    tqdm_class.write(debug_block, file=sys.stderr)
+                else:
+                    print(debug_block, file=sys.stderr)
+
+            # Update progress bar
             if TQDM_AVAILABLE and self._pbar:
-                from tqdm import tqdm as tqdm_class
-                tqdm_class.write(debug_block, file=sys.stderr)
+                self._pbar.update(1)
             else:
-                print(debug_block, file=sys.stderr)
-
-        # Update progress bar
-        if TQDM_AVAILABLE and self._pbar:
-            self._pbar.update(1)
-        else:
-            percent = (self.completed / self.total) * 100
-            print(f"Progress: {self.completed}/{self.total} ({percent:.1f}%)",
-                  file=sys.stderr, end='\r')
+                percent = (self.completed / self.total) * 100
+                print(f"Progress: {self.completed}/{self.total} ({percent:.1f}%)",
+                      file=sys.stderr, end='\r')
 
     def update_cached(self, chunk_index: int) -> None:
         """Update for a cached chunk (loaded from checkpoint)."""
