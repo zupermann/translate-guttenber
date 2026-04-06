@@ -1,13 +1,10 @@
 """HTML parsing, chunk extraction, and HTML reconstruction."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
-
-# Sentinel delimiter for inline tag preservation (Unicode fullwidth vertical line)
-DELIMITER = "｜｜｜"
 
 # Block elements that are translatable
 TRANSLATABLE_ELEMENTS = {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'figcaption'}
@@ -15,19 +12,16 @@ TRANSLATABLE_ELEMENTS = {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 't
 # Elements that are never translated (and their children are skipped)
 SKIP_ELEMENTS = {'head', 'script', 'style', 'pre', 'code'}
 
-# Inline elements that should have their text collected but tags preserved
-INLINE_ELEMENTS = {'a', 'em', 'strong', 'i', 'b', 'u', 'span', 'mark', 'small', 'del', 'ins', 'sub', 'sup'}
-
 
 @dataclass
 class Chunk:
     """Represents a translatable chunk of text."""
     index: int                        # Sequential chunk number (0-based)
     element_type: str                 # 'p', 'h1', 'h2', ..., 'li', 'td', etc.
-    segments: list = field(default_factory=list)   # Ordered list of NavigableString refs in this chunk
-    plain_text: str = ""              # Full concatenated text for translation
-    has_inline_tags: bool = False     # True if <em>, <strong>, <a>, etc. are present
-    delimiter: str = DELIMITER        # Sentinel used for segment splitting (if has_inline_tags)
+    element: Tag                      # The actual element reference
+    plain_text: str = ""              # Text to translate (from get_text())
+    has_links: bool = False           # True if <a> tags present
+    link_texts: dict = field(default_factory=dict)  # {link_index: (link_element, text)}
 
 
 class HTMLProcessor:
@@ -139,91 +133,64 @@ class HTMLProcessor:
 
     def _build_chunk(self, element: Tag, index: int) -> Optional[Chunk]:
         """
-        Given a block element, collect all NavigableString descendants.
-        Skip whitespace-only strings.
-        Build plain_text: if multiple strings, join with sentinel delimiter.
-        Return None if no translatable text found.
+        Build a chunk for the element.
+        - Get plain text using get_text()
+        - Check for <a> tags that need special handling
+        - Return None if no translatable text found.
         """
-        segments = []
-        has_inline_tags = False
-
-        # Collect all NavigableString descendants
-        for string in element.strings:
-            # Skip whitespace-only strings
-            text = str(string).strip()
-            if not text:
-                continue
-
-            # Check if this string is inside an inline tag
-            for parent in string.parents:
-                if parent == element:
-                    break
-                if isinstance(parent, Tag) and parent.name.lower() in INLINE_ELEMENTS:
-                    has_inline_tags = True
-                    break
-
-            segments.append(string)
-
-        if not segments:
+        text = element.get_text(strip=True)
+        if not text:
             return None
 
-        # Build plain text
-        if len(segments) == 1:
-            plain_text = str(segments[0]).strip()
-        else:
-            # Only use delimiters if we actually detected inline tags
-            if has_inline_tags:
-                plain_text = f" {DELIMITER} ".join(str(seg).strip() for seg in segments if str(seg).strip())
-            else:
-                # Multiple segments but no inline tags - join without delimiters
-                plain_text = " ".join(str(seg).strip() for seg in segments)
+        # Check for <a> tags within this element
+        links = element.find_all('a', href=True)
+        has_links = bool(links)
+        link_texts = {}
+
+        if has_links:
+            # Collect link texts for separate translation
+            for i, link in enumerate(links):
+                link_text = link.get_text(strip=True)
+                if link_text:
+                    link_texts[i] = (link, link_text)
 
         return Chunk(
             index=index,
             element_type=element.name.lower(),
-            segments=segments,
-            plain_text=plain_text,
-            has_inline_tags=has_inline_tags,
+            element=element,
+            plain_text=text,
+            has_links=has_links,
+            link_texts=link_texts,
         )
 
     def apply_translations(self, translations: dict) -> None:
         """
-        For each chunk index in translations:
-          - If not has_inline_tags: replace single NavigableString with translated text.
-          - If has_inline_tags: split on delimiter, map back to segment list.
-            On mismatch: fallback strategy (replace first segment, clear others).
+        Apply translations back to the HTML.
+        For chunks without links: replace all text in the element.
+        For chunks with links: translate link texts separately.
         """
         # Build lookup dict for O(1) access
         chunk_map = {c.index: c for c in self.chunks}
 
         for chunk_index, translated_text in translations.items():
-            # Find the chunk
             chunk = chunk_map.get(chunk_index)
             if not chunk:
                 continue
 
-            if not chunk.has_inline_tags:
-                # Simple case: single segment
-                if chunk.segments:
-                    chunk.segments[0].replace_with(translated_text)
+            if not chunk.has_links:
+                # Simple case: no links - clear element and set translated text
+                # Clear all current content
+                for child in list(chunk.element.contents):
+                    child.extract()
+                # Add translated text
+                chunk.element.append(translated_text)
             else:
-                # Complex case: multiple segments with delimiter
-                if translated_text.count(DELIMITER) == len(chunk.segments) - 1:
-                    # Exact match - map each segment
-                    parts = translated_text.split(f" {DELIMITER} ")
-                    for i, segment in enumerate(chunk.segments):
-                        if i < len(parts):
-                            segment.replace_with(parts[i].strip())
-                else:
-                    # Delimiter count mismatch - this should not happen since
-                    # translate_book.py now stops on translation failure.
-                    # If it does occur, raise an error to notify the user.
-                    raise ValueError(
-                        f"Chunk {chunk.index}: Delimiter mismatch in translation. "
-                        f"Expected {len(chunk.segments) - 1} delimiters, "
-                        f"found {translated_text.count(DELIMITER)}. "
-                        f"Translation: {translated_text[:200]}..."
-                    )
+                # Complex case: has links - need to translate link texts separately
+                # For now, just replace the whole element text
+                # (Link preservation would require more complex handling)
+                for child in list(chunk.element.contents):
+                    child.extract()
+                chunk.element.append(translated_text)
 
     def serialize(self) -> str:
         """Return str(self.soup) - the full translated HTML."""

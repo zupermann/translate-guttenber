@@ -16,9 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict
 
-from html_processor import Chunk
-
-from html_processor import HTMLProcessor, DELIMITER
+from html_processor import Chunk, HTMLProcessor
 from translator import OllamaTranslator
 from checkpoint import Checkpoint
 from display import Display
@@ -147,34 +145,18 @@ def estimate_tokens(text: str) -> int:
     return int(len(text.split()) * 1.3)
 
 
-def translate_chunk(chunk: Chunk, translator: OllamaTranslator, delimiter: str):
+def translate_chunk(chunk: Chunk, translator: OllamaTranslator):
     """
     Translate a single chunk. Used by ThreadPoolExecutor.
 
     Args:
         chunk: The chunk to translate
         translator: The translator instance
-        delimiter: The delimiter string for inline tags
 
     Returns:
         tuple: (chunk, result) where result is TranslationResult
     """
-    from translator import TranslationResult
-
-    expected_delimiters = len(chunk.segments) - 1 if chunk.has_inline_tags else 0
-
-    if chunk.has_inline_tags and expected_delimiters > 0:
-        result = translator.translate_with_delimiter_retry(
-            text=chunk.plain_text,
-            expected_delimiter_count=expected_delimiters,
-            delimiter=delimiter
-        )
-    else:
-        result = translator.translate(
-            text=chunk.plain_text,
-            has_delimiters=False
-        )
-
+    result = translator.translate(text=chunk.plain_text)
     return chunk, result
 
 
@@ -298,7 +280,7 @@ def main() -> int:
         with ThreadPoolExecutor(max_workers=args.parallel) as executor:
             # Submit all pending chunks
             futures = {
-                executor.submit(translate_chunk, chunk, translator, DELIMITER): chunk
+                executor.submit(translate_chunk, chunk, translator): chunk
                 for chunk in pending
             }
 
@@ -349,8 +331,7 @@ def main() -> int:
     # 13. processor.apply_translations(translations)
     try:
         processor.apply_translations(translations)
-    except ValueError as e:
-        # Application of translations failed (e.g., delimiter mismatch)
+    except Exception as e:
         msg = f"Translation FAILED: Cannot apply translations for {args.input_file.name}: {e}. Resume with --resume after fixing the issue."
         print(f"\nError: {e}", file=sys.stderr)
         print(f"Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)

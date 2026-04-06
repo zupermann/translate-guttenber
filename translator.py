@@ -66,9 +66,9 @@ Output format: Only the translated text.
 
 """
 
-    USER_PROMPT_TEMPLATE = "TEXT TO TRANSLATE:\n{text}\n\nROMANIAN TRANSLATION:"
+    USER_PROMPT_TEMPLATE = "{text}"
 
-    USER_PROMPT_WITH_DELIMITER = "TEXT TO TRANSLATE (preserve ｜｜｜ delimiters):\n{text}\n\nROMANIAN TRANSLATION:"
+    USER_PROMPT_WITH_DELIMITER = "{text}"
 
     def __init__(
         self,
@@ -333,25 +333,22 @@ Please translate again, keeping {delimiter} delimiters in the exact same positio
         """
         cleaned = raw.strip()
 
-        # Remove common preamble phrases
-        preamble_patterns = [
-            "Here is the translation:",
-            "Here is the Romanian translation:",
-            "Translation:",
-            "Romanian translation:",
-            "The translation is:",
-            "Here is your translation:",
-            "I will translate this for you:",
-            "Sure, here is the translation:",
+        # Remove common preamble/suffix phrases (case insensitive)
+        patterns_to_remove = [
+            r'(?i)Here is the translation:\s*',
+            r'(?i)Here is the Romanian translation:\s*',
+            r'(?i)Translation:\s*',
+            r'(?i)Romanian translation:\s*',
+            r'(?i)The translation is:\s*',
+            r'(?i)Here is your translation:\s*',
+            r'(?i)TEXT TO TRANSLATE.*?\n',  # Remove echoed prompt prefixes
+            r'(?i)ROMANIAN TRANSLATION:\s*',  # Remove echoed suffix
+            r'\n+ROMANIAN TRANSLATION:.*$',  # Remove suffix and anything after
         ]
 
-        for pattern in preamble_patterns:
-            if cleaned.lower().startswith(pattern.lower()):
-                cleaned = cleaned[len(pattern):].strip()
-                # Remove leading colon or newline
-                if cleaned.startswith(':'):
-                    cleaned = cleaned[1:].strip()
-                break
+        import re
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, '', cleaned).strip()
 
         # Remove quotes if the entire text is wrapped
         if (cleaned.startswith('"') and cleaned.endswith('"')) or \
