@@ -58,15 +58,17 @@ echo -e "${GREEN}✓${NC} Dependencies installed"
 deactivate
 
 # Create wrapper script that activates venv and runs the tool
-WRAPPER_SCRIPT="$SCRIPT_DIR/translate-book-wrapper"
-cat > "$WRAPPER_SCRIPT" << 'WRAPPER_EOF'
+# Note: SCRIPT_DIR here is the project directory where venv and translate_book.py live
+PROJECT_DIR="$SCRIPT_DIR"
+WRAPPER_SCRIPT="$PROJECT_DIR/translate-book-wrapper"
+cat > "$WRAPPER_SCRIPT" << WRAPPER_EOF
 #!/bin/bash
 # Wrapper script for translate-book
 # Activates venv and runs the Python script
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/venv/bin/activate"
-python3 "$SCRIPT_DIR/translate_book.py" "$@"
+PROJECT_DIR="$PROJECT_DIR"
+source "\$PROJECT_DIR/venv/bin/activate"
+python3 "\$PROJECT_DIR/translate_book.py" "\$@"
 WRAPPER_EOF
 
 chmod +x "$WRAPPER_SCRIPT"
