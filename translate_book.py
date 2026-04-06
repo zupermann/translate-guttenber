@@ -319,7 +319,13 @@ def main() -> int:
                     )
 
                 if not result.success:
-                    print(f"\nWarning: Chunk {chunk.index} failed: {result.error_message}", file=sys.stderr)
+                    # Stop translation on failure - save checkpoint and notify user
+                    msg = f"Translation FAILED: Chunk {chunk.index} in {args.input_file.name} failed: {result.error_message}. Resume with --resume after fixing the issue."
+                    print(f"\nError: Chunk {chunk.index} failed: {result.error_message}", file=sys.stderr)
+                    print(f"Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
+                    display.close()
+                    notify_telegram(msg)
+                    return 1
 
                 translations[chunk.index] = result.translated_text
                 checkpoint.save(chunk.index, result.translated_text, len(chunks))
@@ -341,7 +347,16 @@ def main() -> int:
         return 130
 
     # 13. processor.apply_translations(translations)
-    processor.apply_translations(translations)
+    try:
+        processor.apply_translations(translations)
+    except ValueError as e:
+        # Application of translations failed (e.g., delimiter mismatch)
+        msg = f"Translation FAILED: Cannot apply translations for {args.input_file.name}: {e}. Resume with --resume after fixing the issue."
+        print(f"\nError: {e}", file=sys.stderr)
+        print(f"Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
+        display.close()
+        notify_telegram(msg)
+        return 1
 
     # 14. Write output HTML file (UTF-8, update lang="ro")
     try:

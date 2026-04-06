@@ -203,22 +203,11 @@ class HTMLProcessor:
                 continue
 
             if not chunk.has_inline_tags:
-                # Simple case: no inline tags, but may have multiple segments
+                # Simple case: single segment
                 if chunk.segments:
-                    # Check if translation is effectively the same as source (failed)
-                    source_text = ''.join(str(seg) for seg in chunk.segments)
-                    if translated_text.strip().lower() == source_text.strip().lower():
-                        # Translation failed or returned identical text - keep original
-                        continue
                     chunk.segments[0].replace_with(translated_text)
-                    # Keep original text for remaining segments (don't clear them)
             else:
                 # Complex case: multiple segments with delimiter
-                # Check if translation is effectively the same as source (failed)
-                source_text = ''.join(str(seg) for seg in chunk.segments)
-                if translated_text.strip().lower() == source_text.strip().lower():
-                    # Translation failed or returned identical text - keep original
-                    continue
                 if translated_text.count(DELIMITER) == len(chunk.segments) - 1:
                     # Exact match - map each segment
                     parts = translated_text.split(f" {DELIMITER} ")
@@ -226,11 +215,15 @@ class HTMLProcessor:
                         if i < len(parts):
                             segment.replace_with(parts[i].strip())
                 else:
-                    # Fallback: delimiter count mismatch
-                    # Replace first segment with full translation, keep original for others
-                    if chunk.segments:
-                        chunk.segments[0].replace_with(translated_text.strip())
-                        # Keep original text for remaining segments (don't clear them)
+                    # Delimiter count mismatch - this should not happen since
+                    # translate_book.py now stops on translation failure.
+                    # If it does occur, raise an error to notify the user.
+                    raise ValueError(
+                        f"Chunk {chunk.index}: Delimiter mismatch in translation. "
+                        f"Expected {len(chunk.segments) - 1} delimiters, "
+                        f"found {translated_text.count(DELIMITER)}. "
+                        f"Translation: {translated_text[:200]}..."
+                    )
 
     def serialize(self) -> str:
         """Return str(self.soup) - the full translated HTML."""
