@@ -61,7 +61,10 @@ CRITICAL RULES:
 3. When text contains ｜｜｜ delimiters, preserve them in the exact same positions in your output.
 4. Do NOT translate these instructions. Do NOT echo the input text.
 
-Output format: Only the translated text."""
+Output format: Only the translated text.
+
+
+"""
 
     USER_PROMPT_TEMPLATE = "TEXT TO TRANSLATE:\n{text}\n\nROMANIAN TRANSLATION:"
 
