@@ -205,12 +205,20 @@ class HTMLProcessor:
             if not chunk.has_inline_tags:
                 # Simple case: no inline tags, but may have multiple segments
                 if chunk.segments:
+                    # Check if translation is effectively the same as source (failed)
+                    source_text = ''.join(str(seg) for seg in chunk.segments)
+                    if translated_text.strip().lower() == source_text.strip().lower():
+                        # Translation failed or returned identical text - keep original
+                        continue
                     chunk.segments[0].replace_with(translated_text)
-                    # Clear any remaining segments (e.g., whitespace splits)
-                    for segment in chunk.segments[1:]:
-                        segment.replace_with('')
+                    # Keep original text for remaining segments (don't clear them)
             else:
                 # Complex case: multiple segments with delimiter
+                # Check if translation is effectively the same as source (failed)
+                source_text = ''.join(str(seg) for seg in chunk.segments)
+                if translated_text.strip().lower() == source_text.strip().lower():
+                    # Translation failed or returned identical text - keep original
+                    continue
                 if translated_text.count(DELIMITER) == len(chunk.segments) - 1:
                     # Exact match - map each segment
                     parts = translated_text.split(f" {DELIMITER} ")
@@ -219,12 +227,10 @@ class HTMLProcessor:
                             segment.replace_with(parts[i].strip())
                 else:
                     # Fallback: delimiter count mismatch
-                    # Replace first segment with full translation, clear others
+                    # Replace first segment with full translation, keep original for others
                     if chunk.segments:
                         chunk.segments[0].replace_with(translated_text.strip())
-                        # Clear remaining segments
-                        for segment in chunk.segments[1:]:
-                            segment.replace_with('')
+                        # Keep original text for remaining segments (don't clear them)
 
     def serialize(self) -> str:
         """Return str(self.soup) - the full translated HTML."""

@@ -133,9 +133,10 @@ Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same
                 if not cleaned or not cleaned.strip():
                     raise ValueError("Empty response from model")
 
-                # Check if response equals source (failed translation)
-                if cleaned.strip().lower() == source_text.strip().lower():
-                    raise ValueError("Response equals source text")
+                # Note: We no longer reject translations that equal source text.
+                # This check was incorrectly failing for texts containing proper nouns
+                # and book titles that shouldn't be translated (per the system prompt).
+                # The model correctly preserves these, so matching source is valid.
 
                 # Extract token counts if available
                 prompt_tokens = response_data.get('prompt_eval_count', 0)
