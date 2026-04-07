@@ -2,9 +2,11 @@
 """Orchestrator CLI that translates an HTML book and then generates its audiobook."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
+from audio_checkpoint import AudioCheckpoint
 from audiobook_pipeline import (
     default_audio_checkpoint_path,
     default_audio_output_path,
@@ -17,6 +19,41 @@ from translation_pipeline import (
     default_translation_output_path,
     translate_html_book,
 )
+
+
+def migrate_legacy_audio_checkpoint(
+    *,
+    translation_output: Path,
+    translation_checkpoint: Path,
+    audio_checkpoint: Path,
+) -> bool:
+    """Copy legacy embedded audio progress into the standalone audio checkpoint file."""
+    if audio_checkpoint.exists() or not translation_checkpoint.exists():
+        return False
+
+    try:
+        with open(translation_checkpoint, "r", encoding="utf-8") as handle:
+            checkpoint_data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read legacy translation checkpoint: {translation_checkpoint}") from exc
+
+    legacy_audio = checkpoint_data.get("audio")
+    if not isinstance(legacy_audio, dict):
+        return False
+
+    has_progress = bool(legacy_audio.get("completed")) or bool(legacy_audio.get("segments"))
+    if not has_progress:
+        return False
+
+    if not translation_output.exists():
+        raise RuntimeError(
+            "Found legacy audiobook progress in the translation checkpoint, "
+            f"but the translated HTML was not found at {translation_output}. "
+            "Resume with the original --translation-output path or start a fresh audiobook run."
+        )
+
+    migrated = AudioCheckpoint(audio_checkpoint, translation_output).import_legacy_audio_state(legacy_audio)
+    return migrated
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -154,6 +191,18 @@ def main() -> int:
     if args.audio_checkpoint is None:
         args.audio_checkpoint = default_audio_checkpoint_path(args.translation_output)
 
+    if args.resume:
+        try:
+            migrate_legacy_audio_checkpoint(
+                translation_output=args.translation_output,
+                translation_checkpoint=args.translation_checkpoint,
+                audio_checkpoint=args.audio_checkpoint,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            notify_telegram(f"Pipeline FAILED: {args.input_file.name} checkpoint migration error: {exc}")
+            return 1
+
     if args.dry_run:
         try:
             summary = collect_translation_dry_run(
@@ -212,6 +261,8 @@ def main() -> int:
         print(f"Audiobook already complete: {args.audio_output}", file=sys.stderr)
         return 0
 
+    audio_resume = args.resume and args.audio_checkpoint.exists()
+
     try:
         audio_result = generate_audiobook(
             input_file=translated_html,
@@ -221,7 +272,7 @@ def main() -> int:
             piper_model=args.piper_model,
             piper_config=args.piper_config,
             ffmpeg_bin=args.ffmpeg_bin,
-            resume=args.resume,
+            resume=audio_resume,
             skip_boilerplate=args.skip_boilerplate,
             force=args.force,
             keep_audio_segments=args.keep_audio_segments,

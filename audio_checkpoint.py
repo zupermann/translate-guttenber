@@ -90,6 +90,44 @@ class AudioCheckpoint:
             self.data["last_updated"] = datetime.now().isoformat()
             self._write_locked()
 
+    def import_legacy_audio_state(self, legacy_audio: Dict) -> bool:
+        """Import embedded pre-refactor audio progress into the standalone checkpoint file."""
+        completed = [int(item) for item in legacy_audio.get("completed", [])]
+        raw_segments = legacy_audio.get("segments", {})
+
+        if not completed and not raw_segments:
+            return False
+
+        normalized_segments = {}
+        for key, value in raw_segments.items():
+            path = value.get("path") if isinstance(value, dict) else value
+            text_hash = value.get("text_hash") if isinstance(value, dict) else None
+            if path:
+                normalized_segments[str(key)] = {
+                    "path": str(path),
+                    "text_hash": text_hash,
+                }
+
+        with self._lock:
+            self.data.update(
+                {
+                    "piper_bin": legacy_audio.get("piper_bin"),
+                    "piper_model": legacy_audio.get("piper_model"),
+                    "piper_config": legacy_audio.get("piper_config"),
+                    "ffmpeg_bin": legacy_audio.get("ffmpeg_bin"),
+                    "segments_dir": legacy_audio.get("segments_dir"),
+                    "output_file": legacy_audio.get("output_file"),
+                    "total_segments": legacy_audio.get("total_segments", 0),
+                    "completed": completed,
+                    "segments": normalized_segments,
+                    "last_updated": legacy_audio.get("last_updated") or datetime.now().isoformat(),
+                }
+            )
+            self._completed_set = set(completed)
+            self._write_locked()
+
+        return True
+
     def is_done(self, chunk_index: int, text: str) -> bool:
         """Return True if the segment exists on disk and matches the current text."""
         with self._lock:
@@ -100,7 +138,8 @@ class AudioCheckpoint:
             if not isinstance(entry, dict):
                 return False
 
-            if entry.get("text_hash") != self._hash_text(text):
+            text_hash = entry.get("text_hash")
+            if text_hash not in (None, "") and text_hash != self._hash_text(text):
                 return False
 
             segment_path = Path(entry.get("path", ""))
