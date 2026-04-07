@@ -1,6 +1,22 @@
 #!/bin/bash
 # Wrapper script for translate-book
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$PROJECT_DIR/venv/bin/activate"
-python3 "$PROJECT_DIR/translate_book.py" "$@"
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+    SOURCE_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
+    SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+    [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+
+PROJECT_DIR="$(cd "$(dirname "$SOURCE_PATH")" && pwd)"
+
+if [ -x "$PROJECT_DIR/venv/bin/python3" ]; then
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python3"
+elif [ -x "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
+else
+    echo "Missing virtualenv Python in $PROJECT_DIR/venv/bin" >&2
+    exit 1
+fi
+
+exec "$PYTHON_BIN" "$PROJECT_DIR/translate_book.py" "$@"
