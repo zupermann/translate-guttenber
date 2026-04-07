@@ -1,6 +1,6 @@
 # Book Translation CLI — Development Plan
 
-Implementation guide for a Python coding agent. Read `01_requirements.md` first for full context. This document defines the module structure, class interfaces, and implementation order.
+Implementation guide for a Python coding agent. Read `01_requirments.md` first for full context. This document defines the module structure, class interfaces, and implementation order.
 
 ***
 
@@ -32,10 +32,10 @@ This is the most critical module. It owns all interaction with BeautifulSoup and
 class Chunk:
     index: int                        # Sequential chunk number (0-based)
     element_type: str                 # 'p', 'h1', 'h2', ..., 'li', 'td', etc.
-    segments: list[NavigableString]   # Ordered list of text node refs in this chunk
-    plain_text: str                   # Full concatenated text for translation
-    has_inline_tags: bool             # True if <em>, <strong>, <a>, etc. are present
-    delimiter: str                    # Sentinel used for segment splitting (if has_inline_tags)
+    element: Tag                      # Element reference in the soup tree
+    plain_text: str                   # Plain text for translation (`get_text(strip=True)`)
+    has_links: bool                   # True if <a> tags are present in the element
+    link_texts: dict                  # Optional collected link text metadata
 ```
 
 ### Class: `HTMLProcessor`
@@ -68,37 +68,26 @@ class HTMLProcessor:
 
     def _build_chunk(self, element, index: int) -> Chunk | None:
         """
-        Given a block element, collect all NavigableString descendants.
-        Skip whitespace-only strings.
-        Build plain_text: if multiple strings, join with sentinel delimiter.
+        Given a block element, extract plain_text with get_text(strip=True).
+        Optionally collect link metadata for inspection/debugging.
         Return None if no translatable text found.
         """
 
     def apply_translations(self, translations: dict[int, str]) -> None:
         """
         For each chunk index in translations:
-          - If not has_inline_tags: replace single NavigableString with translated text.
-          - If has_inline_tags: split on delimiter, map back to segment list.
-            On mismatch: fallback strategy (replace first segment, clear others).
+          - Clear the element contents.
+          - Append translated plain text to the element.
         """
 
     def serialize(self) -> str:
         """Return str(self.soup) — the full translated HTML."""
 ```
 
-### Sentinel Delimiter
+### Inline Formatting Tradeoff
 
-Use `｜｜｜` (Unicode fullwidth vertical lines, U+FF5C repeated). This character is vanishingly unlikely to appear in English 19th-century prose and is also unlikely to be tokenized ambiguously by the model.
-
-When building `plain_text` for a chunk with inline tags:
-```python
-plain_text = " ｜｜｜ ".join(seg.strip() for seg in segments if seg.strip())
-```
-
-Prompt addition for inline-tag chunks (append to standard prompt):
-```
-Preserve the ｜｜｜ delimiters exactly as-is in your translation, in the same positions.
-```
+Current implementation prefers robust chunk-level translation over inline-tag preservation.
+When translated text is written back, inline markup inside the translated element may be flattened.
 
 ***
 
@@ -157,9 +146,8 @@ in their original English form. Do not translate them."""
     def translate(self, text: str, has_delimiters: bool = False) -> TranslationResult:
         """
         POST to /api/chat with system + user messages.
-        If has_delimiters is True, append delimiter preservation instruction to user message.
         Return TranslationResult with translated text, token counts, and timing.
-        Retry up to MAX_RETRIES on empty response or echoed source.
+        Retry up to MAX_RETRIES on empty response or request failure.
         """
 
     def _call_api(self, messages: list[dict]) -> dict:
@@ -325,10 +313,7 @@ for chunk in chunks:
         display.update(chunk, cached=True)
         continue
 
-    result = translator.translate(
-        text=chunk.plain_text,
-        has_delimiters=chunk.has_inline_tags
-    )
+    result = translator.translate(text=chunk.plain_text)
 
     translations[chunk.index] = result.translated_text
     checkpoint.save(chunk.index, result.translated_text, len(chunks))
@@ -376,7 +361,7 @@ Build and test each step before moving to the next. Each step is independently t
 
 ### Step 7 — Edge Cases
 - Test a Gutenberg HTML with heavy dialogue (many short `<p>` tags)
-- Test a chapter with inline `<em>` / `<strong>` (mixed-content re-mapping)
+- Test a chapter with inline `<em>` / `<strong>` and verify expected flattening behavior
 - Test resume after interruption at chunk 1, 50, and last chunk
 - Test `--dry-run` output accuracy (compare estimated chunks with actual)
 
@@ -413,10 +398,10 @@ Est. time @ 40/s: ~24 minutes
 
 | Edge Case | Handling |
 |---|---|
-| `<p>` contains only `<br>` tags with no text | Skip — no NavigableStrings |
+| `<p>` contains only `<br>` tags with no text | Skip — no translatable text |
 | `<p>` contains only whitespace strings | Skip |
 | `<p>` spans thousands of tokens (James Joyce, legal prose) | Send as-is — never split a paragraph |
-| `<a>` inside `<p>` — link text must be translated | Include in NavigableString collection; href stays untouched |
+| `<a>` inside `<p>` | Full element content is replaced by translated text, so inline anchor markup is flattened |
 | `<img alt="...">` — alt text | Do NOT translate; it's an attribute |
 | Nested `<blockquote>` | Translate inner `<p>` children individually, not the blockquote wrapper |
 | Chapter title in a `<div>` not a `<h*>` tag | Detected by leaf-div heuristic in `_is_translatable_element` |
@@ -430,10 +415,10 @@ Est. time @ 40/s: ~24 minutes
 - [ ] `translate_book.py --help` shows all options with descriptions
 - [ ] `--dry-run` on any Gutenberg HTML prints stats without calling Ollama
 - [ ] Normal run produces output HTML that opens correctly in a browser
-- [ ] Output HTML structure is byte-identical to input except for text node content and `lang` attribute
+- [ ] Output HTML remains valid and readable after translation
 - [ ] `--debug` shows side-by-side chunks in real time without corrupting the progress bar
 - [ ] `--resume` correctly skips completed chunks after any interruption
 - [ ] Boilerplate (Gutenberg header, license) is preserved untranslated
-- [ ] Inline tags (`<em>`, `<strong>`, `<a>`) are preserved inside translated paragraphs
+- [ ] Inline-tag flattening behavior is documented and accepted
 - [ ] Names are not translated (verified manually on a few test paragraphs)
 - [ ] Checkpoint file is deleted on successful completion

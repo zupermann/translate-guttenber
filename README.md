@@ -4,10 +4,10 @@ A Python CLI tool that translates Project Gutenberg books from English to Romani
 
 ## Features
 
-- Translates HTML while preserving complete structure
+- Translates Gutenberg HTML in chunked plain-text blocks while keeping document-level structure
 - Chunk-based processing with checkpointing for resumable translations
 - Automatic Gutenberg boilerplate detection and skipping
-- Inline tag preservation (em, strong, a, etc.) using delimiter markers
+- Simple write-back strategy: translated text replaces element content
 - Progress bar with optional debug output
 - Telegram notifications on completion/interruption/error
 
@@ -74,11 +74,11 @@ translate-book pg1342.html --model translategemma:12b
 
 ## How It Works
 
-1. Parses HTML and extracts translatable text nodes
+1. Parses HTML and extracts translatable block elements
 2. Groups text into chunks (paragraphs, headings, list items, etc.)
 3. Sends each chunk to Ollama for translation
-4. Preserves inline formatting using `｜｜｜` delimiters
-5. Reconstructs HTML with translated text
+4. Replaces each chunk element's content with translated text
+5. Preserves document-level structure and metadata while writing translated content
 6. Saves checkpoint after each chunk for resumability
 
 ## Post-Processing to EPUB

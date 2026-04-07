@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Python CLI tool that translates Project Gutenberg books from English to Romanian using a local Ollama TranslateGemma model. The tool accepts an HTML source file, translates all human-readable text while preserving the complete HTML structure, and writes a translated HTML output file.
+A Python CLI tool that translates Project Gutenberg books from English to Romanian using a local Ollama TranslateGemma model. The tool accepts an HTML source file, translates human-readable text in block chunks, and writes a translated HTML output file.
 
 ***
 
@@ -24,9 +24,9 @@ pandoc translated_book.html -o translated_book.epub --metadata title="Book Title
 
 ## HTML Processing Strategy
 
-### Core Principle: Translate Text Nodes, Never Tags
+### Core Principle: Translate Block Text, Never Tags
 
-The application must **never send HTML markup to the translation model**. All HTML structure, attributes, IDs, classes, and tag names remain untouched in memory. Only the string content of text nodes is extracted, translated, and replaced in-place within the BeautifulSoup tree.
+The application must **never send HTML markup to the translation model**. It extracts plain text from translatable block elements, translates that text, and writes the translated plain text back into those elements.
 
 ### Processing Pipeline
 
@@ -34,9 +34,9 @@ The application must **never send HTML markup to the translation model**. All HT
 HTML file
   └─ BeautifulSoup parse (html.parser)
        └─ Walk the DOM tree
-            └─ Collect translatable text nodes grouped by paragraph element
+            └─ Collect translatable block elements and extract plain text (`get_text(strip=True)`)
                  └─ Send plain text to Ollama
-                      └─ Replace NavigableString in-place with translated text
+                      └─ Replace each chunk element's content with translated text
                            └─ Serialize full soup back to HTML
                                 └─ Write output file
 ```
@@ -68,22 +68,13 @@ Text nodes that are direct children or descendants of the following block elemen
 
 ### Chunk Assembly from HTML
 
-Each `<p>` element is one translation chunk. Its full inner text (concatenation of all NavigableString descendants, joined with a single space) is sent as one request. **A paragraph is never split, regardless of its token length.**
+Each `<p>` element is one translation chunk. Its full text (`get_text(strip=True)`) is sent as one request. **A paragraph is never split, regardless of its token length.**
 
 For other block elements (`<h1>`–`<h6>`, `<li>`, etc.), each element is its own chunk.
 
-After translation, the model response is distributed back to the original NavigableString nodes within that element. If a `<p>` contains mixed content (e.g., `<p>He said <em>hello</em> to her.</p>`), the text is extracted segment by segment, translated as a unit, and re-mapped to the original NavigableString positions.
+After translation, the model response is written back as plain text content for that element.
 
-#### Mixed-Content Re-mapping
-
-For paragraphs with inline tags (`<em>`, `<strong>`, `<a>`, `<span>`):
-
-1. Collect all NavigableString children in order, noting their positions.
-2. Concatenate them with a sentinel delimiter (e.g., `｜｜｜`) that is unlikely to appear in the source text.
-3. Send the joined string to the model, instructing it to preserve the delimiters.
-4. Split the response on the same delimiter and map each segment back to its original NavigableString.
-
-Fallback: if the delimiter count in the response does not match the source, replace the entire paragraph's text with the translated string and strip inline tags from that element (acceptable degradation — formatting of a single word is lost, prose is preserved).
+Note: for mixed-content elements (e.g., `<p>He said <em>hello</em> to her.</p>`), inline tags inside the chunk are flattened by this write-back strategy. This is an intentional simplification for robustness.
 
 ***
 
@@ -159,6 +150,8 @@ python translate_book.py [OPTIONS] INPUT_FILE
 | `--debug` | flag | no | Enable debug mode: log source and translation side-by-side to stderr |
 | `--dry-run` | flag | no | Parse and count chunks, print stats, do not call the model |
 | `--skip-boilerplate` | flag | no | Auto-detect and skip Gutenberg header/footer boilerplate (default: on) |
+| `--parallel` | int | no | Number of parallel translation workers. Default: `2` |
+| `--force` | flag | no | Overwrite output file if it already exists |
 
 ### Usage Examples
 
@@ -250,16 +243,15 @@ The `source_hash` is used to detect if the source file changed between runs and 
 |---|---|
 | Ollama not reachable | Exit immediately with clear error message and URL hint |
 | Model not found in Ollama | Exit immediately, list available models |
-| Empty response from model | Retry up to 3 times with 2s delay; if all fail, log warning and write source text unchanged |
-| Response equals source text | Treat as failed translation, retry once |
-| Delimiter count mismatch in mixed-content re-mapping | Fallback: replace full paragraph text, strip inline tags, log warning |
-| Output file already exists (no `--resume`) | Prompt user to confirm overwrite unless `--force` flag is set |
+| Empty response / request failure | Retry up to 3 times with 2s delay; if all fail, mark chunk as failed |
+| Chunk translation failed after retries | Abort the run, keep checkpoint, and instruct resume after fixing the issue |
+| Output file already exists (no `--resume`) | Exit with error unless `--force` is set |
 
 ***
 
 ## Output File
 
-The output is a valid HTML file identical in structure to the input, with all translatable text nodes replaced by their Romanian equivalents. The file encoding is UTF-8. The `<html lang="...">` attribute is updated to `lang="ro"` if present.
+The output is a valid HTML file with translated chunk content in Romanian. The file encoding is UTF-8. The `<html lang="...">` attribute is updated to `lang="ro"` if present.
 
 ***
 
