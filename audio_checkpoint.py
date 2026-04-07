@@ -5,7 +5,7 @@ import json
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 
 class AudioCheckpoint:
@@ -15,20 +15,7 @@ class AudioCheckpoint:
         self.path = path
         self.source_file = source_file
         self.source_hash = self._hash_file(source_file)
-        self.data: Dict = {
-            "source_file": str(source_file),
-            "source_hash": self.source_hash,
-            "piper_bin": None,
-            "piper_model": None,
-            "piper_config": None,
-            "ffmpeg_bin": None,
-            "segments_dir": None,
-            "output_file": None,
-            "total_segments": 0,
-            "completed": [],
-            "segments": {},
-            "last_updated": None,
-        }
+        self.data: Dict[str, Any] = self._default_data()
         self._completed_set: Set[int] = set()
         self._lock = threading.Lock()
 
@@ -57,9 +44,8 @@ class AudioCheckpoint:
     def configure(
         self,
         *,
-        piper_bin: str,
-        piper_model: str,
-        piper_config: str,
+        tts_engine: str,
+        tts_config: Dict[str, Any],
         ffmpeg_bin: str,
         segments_dir: Path,
         output_file: Path,
@@ -68,9 +54,11 @@ class AudioCheckpoint:
         """Store audiobook configuration and guard resume compatibility."""
         with self._lock:
             new_state = {
-                "piper_bin": str(piper_bin),
-                "piper_model": str(piper_model),
-                "piper_config": str(piper_config),
+                "tts_engine": str(tts_engine),
+                "tts_config": dict(tts_config),
+                "piper_bin": tts_config.get("piper_bin"),
+                "piper_model": tts_config.get("piper_model"),
+                "piper_config": tts_config.get("piper_config"),
                 "ffmpeg_bin": str(ffmpeg_bin),
                 "segments_dir": str(segments_dir),
                 "output_file": str(output_file),
@@ -78,11 +66,24 @@ class AudioCheckpoint:
             }
 
             if self._completed_set:
-                for key, value in new_state.items():
+                existing_engine = self.data.get("tts_engine")
+                existing_config = self.data.get("tts_config") or {}
+                if existing_engine not in (None, "", new_state["tts_engine"]):
+                    raise ValueError(
+                        "Audio checkpoint was created with different TTS/ffmpeg settings. "
+                        "Resume with the same audio configuration or delete the audio checkpoint."
+                    )
+                if existing_config not in ({}, new_state["tts_config"]) and existing_config != new_state["tts_config"]:
+                    raise ValueError(
+                        "Audio checkpoint was created with different TTS/ffmpeg settings. "
+                        "Resume with the same audio configuration or delete the audio checkpoint."
+                    )
+
+                for key in ("ffmpeg_bin", "segments_dir", "output_file", "total_segments"):
                     existing = self.data.get(key)
-                    if existing not in (None, 0) and str(existing) != str(value):
+                    if existing not in (None, 0, "") and existing != new_state[key]:
                         raise ValueError(
-                            "Audio checkpoint was created with different Piper/ffmpeg settings. "
+                            "Audio checkpoint was created with different TTS/ffmpeg settings. "
                             "Resume with the same audio configuration or delete the audio checkpoint."
                         )
 
@@ -90,7 +91,7 @@ class AudioCheckpoint:
             self.data["last_updated"] = datetime.now().isoformat()
             self._write_locked()
 
-    def import_legacy_audio_state(self, legacy_audio: Dict) -> bool:
+    def import_legacy_audio_state(self, legacy_audio: Dict[str, Any]) -> bool:
         """Import embedded pre-refactor audio progress into the standalone checkpoint file."""
         completed = [int(item) for item in legacy_audio.get("completed", [])]
         raw_segments = legacy_audio.get("segments", {})
@@ -108,12 +109,23 @@ class AudioCheckpoint:
                     "text_hash": text_hash,
                 }
 
+        tts_engine = legacy_audio.get("tts_engine") or "piper"
+        tts_config = legacy_audio.get("tts_config")
+        if not isinstance(tts_config, dict) or not tts_config:
+            tts_config = {
+                "piper_bin": legacy_audio.get("piper_bin"),
+                "piper_model": legacy_audio.get("piper_model"),
+                "piper_config": legacy_audio.get("piper_config"),
+            }
+
         with self._lock:
             self.data.update(
                 {
-                    "piper_bin": legacy_audio.get("piper_bin"),
-                    "piper_model": legacy_audio.get("piper_model"),
-                    "piper_config": legacy_audio.get("piper_config"),
+                    "tts_engine": tts_engine,
+                    "tts_config": tts_config,
+                    "piper_bin": tts_config.get("piper_bin"),
+                    "piper_model": tts_config.get("piper_model"),
+                    "piper_config": tts_config.get("piper_config"),
                     "ffmpeg_bin": legacy_audio.get("ffmpeg_bin"),
                     "segments_dir": legacy_audio.get("segments_dir"),
                     "output_file": legacy_audio.get("output_file"),
@@ -183,7 +195,7 @@ class AudioCheckpoint:
                 return False
         return True
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> Dict[str, Any]:
         """Return checkpoint statistics."""
         total_segments = self.data.get("total_segments", 0)
         completed = self.completed_count()
@@ -192,6 +204,24 @@ class AudioCheckpoint:
             "completed": completed,
             "percent": (completed / total_segments * 100) if total_segments > 0 else 0,
             "last_updated": self.data.get("last_updated"),
+        }
+
+    def _default_data(self) -> Dict[str, Any]:
+        return {
+            "source_file": str(self.source_file),
+            "source_hash": self.source_hash,
+            "tts_engine": None,
+            "tts_config": {},
+            "piper_bin": None,
+            "piper_model": None,
+            "piper_config": None,
+            "ffmpeg_bin": None,
+            "segments_dir": None,
+            "output_file": None,
+            "total_segments": 0,
+            "completed": [],
+            "segments": {},
+            "last_updated": None,
         }
 
     def _hash_file(self, file_path: Path) -> str:
@@ -207,25 +237,21 @@ class AudioCheckpoint:
         digest = hashlib.sha256(text.encode("utf-8"))
         return f"sha256:{digest.hexdigest()}"
 
-    def _normalize_loaded_data(self, loaded_data: Dict) -> Dict:
-        data = dict(loaded_data)
-        defaults = {
-            "source_file": str(self.source_file),
-            "source_hash": self.source_hash,
-            "piper_bin": None,
-            "piper_model": None,
-            "piper_config": None,
-            "ffmpeg_bin": None,
-            "segments_dir": None,
-            "output_file": None,
-            "total_segments": 0,
-            "completed": [],
-            "segments": {},
-            "last_updated": None,
+    def _normalize_loaded_data(self, loaded_data: Dict[str, Any]) -> Dict[str, Any]:
+        data = self._default_data()
+        data.update(loaded_data)
+
+        legacy_tts_config = {
+            "piper_bin": data.get("piper_bin"),
+            "piper_model": data.get("piper_model"),
+            "piper_config": data.get("piper_config"),
         }
 
-        for key, value in defaults.items():
-            data.setdefault(key, value)
+        if not data.get("tts_engine") and any(legacy_tts_config.values()):
+            data["tts_engine"] = "piper"
+
+        if (not isinstance(data.get("tts_config"), dict) or not data.get("tts_config")) and any(legacy_tts_config.values()):
+            data["tts_config"] = legacy_tts_config
 
         data["completed"] = [int(item) for item in data.get("completed", [])]
         normalized_segments = {}

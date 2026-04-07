@@ -3,7 +3,7 @@
 This repository provides three cleanly separated CLIs for Project Gutenberg HTML books:
 
 - `translate-book` translates English HTML into Romanian HTML with Ollama
-- `generate-audiobook` turns narration-ready HTML into an audiobook with Piper + ffmpeg
+- `generate-audiobook` turns narration-ready HTML into an audiobook with a selectable TTS backend + ffmpeg
 - `book-pipeline` orchestrates both steps automatically
 
 The CLIs share parsing and pipeline modules, but each command has a single responsibility.
@@ -13,7 +13,9 @@ The CLIs share parsing and pipeline modules, but each command has a single respo
 - HTML-first processing for Gutenberg books
 - Chunk-based translation with resumable checkpoints
 - Separate audiobook generation from already-translated HTML
-- Per-chunk WAV synthesis with Piper
+- Per-chunk WAV synthesis with Piper or XTTS-v2 (`tts-ro`)
+- XTTS-oriented speech cleanup for digits, symbols, and short phrase splitting
+- Parallel XTTS rendering to better utilize available GPU memory
 - Brief pauses after heading chunks for more natural narration
 - Final audiobook assembly with `ffmpeg`
 - Orchestrated end-to-end workflow when you want one command
@@ -36,7 +38,7 @@ This installs three commands into `~/.local/bin`:
 
 - Python 3.x
 - Ollama running locally with a TranslateGemma model for translation
-- Piper installed locally for TTS
+- Piper installed locally for legacy TTS, or `tts-ro` installed locally for XTTS-v2
 - `ffmpeg` installed locally for final audio assembly
 - Python dependencies from `requirements.txt`
 
@@ -63,9 +65,15 @@ generate-audiobook pg8492-images_ro.html \
   --piper-model ~/piper/models/ro_RO-mihai-medium.onnx \
   --piper-config ~/piper/models/ro_RO-mihai-medium.onnx.json \
   --heading-pause-seconds 0.75
+generate-audiobook pg8492-images_ro.html \
+  --tts-engine xtts-ro \
+  --speaker-wav ~/voices/narrator.wav \
+  --tts-parallel 8 \
+  --device cuda
 ```
 
 This command expects narration-ready HTML, typically the translated HTML from `translate-book`.
+When `--tts-engine xtts-ro` is selected, the pipeline shortens phrases aggressively, verbalizes digits into Romanian words, strips unsupported symbols, and forwards XTTS options like `--speaker-wav`, `--voice`, `--cache-dir`, `--device`, `--tts-temperature`, `--tts-top-p`, `--tts-top-k`, `--tts-length-penalty`, and `--tts-repetition-penalty`.
 
 ### 3. End-to-End Orchestration
 
@@ -75,6 +83,10 @@ book-pipeline pg8492-images.html --resume
 book-pipeline pg8492-images.html \
   --translation-output pg8492-images_ro.html \
   --audio-output pg8492-images_ro.m4b
+book-pipeline pg8492-images.html \
+  --tts-engine xtts-ro \
+  --speaker-wav ~/voices/narrator.wav \
+  --tts-parallel 8
 ```
 
 This command translates first, then feeds the translated HTML into the audiobook CLI logic.
@@ -94,8 +106,9 @@ This command translates first, then feeds the translated HTML into the audiobook
 1. Parse the translated HTML.
 2. Extract the same readable block chunks.
 3. Normalize text for narration.
-4. Generate one WAV file per chunk with Piper.
-5. Concatenate the WAV files into the final audiobook with `ffmpeg`.
+4. For XTTS, split long text into short speech-safe Romanian phrases and add pause metadata.
+5. Generate one WAV file per speech chunk with the selected TTS engine.
+6. Concatenate the WAV files into the final audiobook with `ffmpeg`.
 
 ## Output Defaults
 

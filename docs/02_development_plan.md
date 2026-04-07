@@ -16,7 +16,7 @@ checkpoint.py              # translation checkpoint
 audio_checkpoint.py        # audiobook checkpoint
 html_processor.py          # HTML parsing and reconstruction
 speech_processor.py        # narration cleanup
-tts_engine.py              # Piper wrapper
+tts_engine.py              # Piper + XTTS wrappers
 audio_builder.py           # ffmpeg assembly
 ```
 
@@ -72,8 +72,9 @@ Owns:
 
 - loading/parsing translated HTML
 - narration chunk preparation
-- Piper initialization
+- TTS engine initialization
 - per-chunk WAV rendering
+- parallel XTTS rendering when configured
 - final `ffmpeg` assembly
 - optional segment cleanup
 
@@ -111,7 +112,11 @@ Keep audio-only state:
 {
   "source_file": "book_ro.html",
   "source_hash": "sha256:...",
-  "piper_model": "/path/to/model.onnx",
+  "tts_engine": "xtts-ro",
+  "tts_config": {
+    "speaker_wav": "/path/to/voice.wav",
+    "temperature": 0.3
+  },
   "total_segments": 123,
   "completed": [0, 1],
   "segments": {
@@ -127,10 +132,34 @@ Reason:
 
 - translation resume and audio resume evolve independently
 - audio correctness needs text-hash validation, not just chunk index reuse
+- audio resume must reject runs that switch between Piper and XTTS settings mid-stream
 
 ***
 
-## Phase 4: Installation Surface
+## Phase 4: XTTS-Oriented Speech Prep
+
+### `speech_processor.py`
+
+Extend narration preprocessing so XTTS can receive short, clean prompts:
+
+- split phrases on punctuation such as `,`, `;`, `:`, `.`, `!`, `?`
+- convert digits into Romanian words
+- replace or remove unsupported symbols
+- split long phrases around connector words such as `și`, `sau`, `dar`, `iar`
+- attach short pause metadata so concatenated short clips still sound natural
+
+### `tts_engine.py`
+
+Add:
+
+- a selectable engine abstraction
+- existing Piper support
+- `tts-ro` XTTS-v2 support with pass-through CLI parameters
+- engine-specific defaults such as XTTS parallel worker count and speech chunking profile
+
+***
+
+## Phase 5: Installation Surface
 
 - keep `translate-book`
 - add `generate-audiobook`
@@ -140,17 +169,20 @@ Reason:
 
 ***
 
-## Phase 5: Documentation Rewrite
+## Phase 6: Documentation Rewrite
 
 ### README
 
 - explain the three commands clearly
 - state that audiobook generation now belongs to its own CLI
 - document the orchestrator workflow
+- document both Piper and XTTS usage
+- document XTTS-specific short-phrase behavior and CLI passthrough options
 
 ### Requirements
 
 - update architecture and responsibility boundaries
+- note the new engine abstraction and XTTS chunking rules
 
 ### Plan
 
@@ -168,6 +200,7 @@ Reason:
 
 - translation CLI dry run
 - audiobook CLI with fake Piper/ffmpeg wrappers
+- audiobook CLI with a fake `tts-ro` wrapper and short-phrase inputs
 - orchestrator CLI imports and argument parsing
 
 ### Manual Run
@@ -175,6 +208,7 @@ Reason:
 - translate a short Gutenberg HTML file
 - generate audiobook from translated HTML
 - run the orchestrator end to end
+- validate XTTS resume with `--speaker-wav` and parallel workers
 
 ***
 
@@ -184,3 +218,4 @@ Reason:
 - users can generate audio without pulling in Ollama
 - users can run one end-to-end command when they want automation
 - the codebase is simpler to reason about because each CLI maps to one pipeline
+- XTTS-v2 can be used for higher-quality Romanian narration without removing the legacy Piper path

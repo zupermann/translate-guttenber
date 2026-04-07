@@ -50,7 +50,7 @@ Responsibilities:
 - parse narration-ready HTML
 - extract readable chunks
 - normalize text for speech
-- synthesize one WAV segment per chunk with Piper
+- synthesize WAV segments with a selectable TTS engine
 - stitch the final audiobook with `ffmpeg`
 - checkpoint audio generation progress
 
@@ -142,27 +142,42 @@ Must not:
   - isolated bracket footnote markers
   - raw URLs
 - Preserve headings and paragraph order.
+- When the selected TTS engine requires shorter prompts, support phrase-level splitting:
+  - split on `,`, `;`, `:`, `.`, `!`, `?`
+  - further split long phrases around connector words such as `și`, `sau`, `dar`, `iar`, `ori`
+- For XTTS-style synthesis, strip or verbalize unsupported symbols and digits so the final text sent to the TTS CLI contains short, speech-safe Romanian phrases.
 
 ### TTS Generation
 
-- Use Piper as an external CLI dependency.
+- Keep Piper as a supported external CLI dependency.
+- Add XTTS-v2 support through the `tts-ro` external CLI.
 - Generate one WAV file per speech chunk.
-- Require configurable paths for:
+- Allow the user to select the TTS engine at the CLI level.
+- Require configurable paths/settings for the selected engine:
   - Piper executable
   - Piper model
   - Piper config
+  - XTTS CLI executable
+  - XTTS voice or speaker WAV
+  - XTTS cache dir
+  - XTTS device
+  - XTTS sampling/penalty parameters
+- Pass XTTS-related CLI parameters through to `tts-ro` when provided.
+- Support parallel TTS rendering so lightweight XTTS invocations can better utilize available GPU memory.
 
 ### Audio Assembly
 
 - Use `ffmpeg` to concatenate chunk WAV files in order.
 - Default final output should be `.m4b`.
 - Support keeping intermediate WAV files for debugging.
+- Preserve natural pacing by inserting short silent pauses after heading chunks and between phrase-level XTTS splits when needed.
 
 ### Audio Checkpointing
 
 - Save progress after each rendered speech chunk.
 - Resume with `--resume`.
 - Reuse segments only when both the file exists and the normalized speech text still matches.
+- Validate resume compatibility against the selected TTS engine and its synthesis-affecting settings, not only Piper-specific paths.
 
 ***
 
@@ -193,7 +208,7 @@ Must not:
 ### Audiobook
 
 - `speech_processor.py` owns narration cleanup.
-- `tts_engine.py` owns Piper invocation.
+- `tts_engine.py` owns TTS engine selection plus Piper and XTTS CLI invocation.
 - `audio_builder.py` owns `ffmpeg` concat/encoding.
 - `audio_checkpoint.py` owns audio-only checkpoint state.
 - `audiobook_pipeline.py` owns audiobook workflow orchestration.
@@ -210,6 +225,6 @@ Must not:
 
 - Runs fully locally.
 - Supports long-running books.
-- Fails early when Ollama, Piper, or `ffmpeg` are unavailable for the stage that needs them.
+- Fails early when Ollama, the selected TTS engine, or `ffmpeg` are unavailable for the stage that needs them.
 - Keeps checkpoints stage-specific and understandable.
 - Keeps the user-facing command model simple and unsurprising.
