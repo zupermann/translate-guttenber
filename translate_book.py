@@ -12,7 +12,7 @@ import argparse
 import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Dict
 
@@ -132,7 +132,7 @@ Examples:
 
     parser.add_argument(
         "--parallel",
-        type=int,
+        type=positive_int,
         default=2,
         help="Number of parallel translation workers. Default: 2"
     )
@@ -143,6 +143,14 @@ Examples:
 def estimate_tokens(text: str) -> int:
     """Estimate token count using word count heuristic."""
     return int(len(text.split()) * 1.3)
+
+
+def positive_int(value: str) -> int:
+    """Argparse helper for positive integers."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def translate_chunk(chunk: Chunk, translator: OllamaTranslator):
@@ -251,7 +259,18 @@ def main() -> int:
     # 9. Load or create Checkpoint
     checkpoint = Checkpoint(args.checkpoint, args.input_file, args.model)
     if args.resume:
-        checkpoint.load()
+        try:
+            loaded = checkpoint.load()
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+        if not loaded:
+            print(
+                f"Error: Resume requested but no valid checkpoint could be loaded from {args.checkpoint}",
+                file=sys.stderr
+            )
+            return 1
 
     # 10. Check if output file exists (unless --force or --resume)
     if args.output.exists() and not args.force and not args.resume:
@@ -275,21 +294,31 @@ def main() -> int:
             display.update_cached(chunk.index)
 
     shutdown_requested = False
+    interrupted = False
+    failure_message = None
+    executor = ThreadPoolExecutor(max_workers=args.parallel)
 
     try:
-        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-            # Submit all pending chunks
-            futures = {
-                executor.submit(translate_chunk, chunk, translator): chunk
-                for chunk in pending
-            }
+        pending_iter = iter(pending)
+        in_flight = {}
 
-            # Process results as they complete
-            for future in as_completed(futures):
-                if shutdown_requested:
-                    break
+        def submit_next() -> bool:
+            """Keep the executor pipeline full without queueing the whole job."""
+            chunk = next(pending_iter, None)
+            if chunk is None:
+                return False
+            in_flight[executor.submit(translate_chunk, chunk, translator)] = chunk
+            return True
 
-                chunk = futures[future]
+        for _ in range(min(args.parallel, len(pending))):
+            if not submit_next():
+                break
+
+        while in_flight:
+            done, _ = wait(set(in_flight.keys()), return_when=FIRST_COMPLETED)
+
+            for future in done:
+                chunk = in_flight.pop(future)
                 try:
                     _, result = future.result()
                 except Exception as e:
@@ -301,13 +330,14 @@ def main() -> int:
                     )
 
                 if not result.success:
-                    # Stop translation on failure - save checkpoint and notify user
-                    msg = f"Translation FAILED: Chunk {chunk.index} in {args.input_file.name} failed: {result.error_message}. Resume with --resume after fixing the issue."
+                    failure_message = (
+                        f"Translation FAILED: Chunk {chunk.index} in {args.input_file.name} "
+                        f"failed: {result.error_message}. Resume with --resume after fixing the issue."
+                    )
                     print(f"\nError: Chunk {chunk.index} failed: {result.error_message}", file=sys.stderr)
-                    print(f"Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
-                    display.close()
-                    notify_telegram(msg)
-                    return 1
+                    print("Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
+                    shutdown_requested = True
+                    break
 
                 translations[chunk.index] = result.translated_text
                 checkpoint.save(chunk.index, result.translated_text, len(chunks))
@@ -320,12 +350,32 @@ def main() -> int:
                     tokens=result.output_tokens
                 )
 
+                submit_next()
+
+            if shutdown_requested:
+                break
+
     except KeyboardInterrupt:
-        shutdown_requested = True
-        msg = f"Translation PAUSED: {args.input_file.name} interrupted. Resume with --resume."
+        interrupted = True
         print("\n\nInterrupted! Progress saved to checkpoint.", file=sys.stderr)
+        failure_message = f"Translation PAUSED: {args.input_file.name} interrupted. Resume with --resume."
+
+    finally:
+        executor.shutdown(
+            wait=not shutdown_requested and not interrupted,
+            cancel_futures=shutdown_requested or interrupted
+        )
+
+    if shutdown_requested:
         display.close()
-        notify_telegram(msg)
+        if failure_message:
+            notify_telegram(failure_message)
+        return 1
+
+    if interrupted:
+        display.close()
+        if failure_message:
+            notify_telegram(failure_message)
         return 130
 
     # 13. processor.apply_translations(translations)

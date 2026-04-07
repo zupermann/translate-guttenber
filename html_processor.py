@@ -1,13 +1,41 @@
 """HTML parsing, chunk extraction, and HTML reconstruction."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 
 # Block elements that are translatable
 TRANSLATABLE_ELEMENTS = {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'figcaption'}
+
+# Block-like descendants that should disqualify an element from being treated
+# as a simple leaf chunk.
+BLOCK_DESCENDANTS = TRANSLATABLE_ELEMENTS | {
+    'address',
+    'article',
+    'aside',
+    'div',
+    'dl',
+    'dt',
+    'dd',
+    'fieldset',
+    'figure',
+    'form',
+    'footer',
+    'header',
+    'hr',
+    'main',
+    'nav',
+    'ol',
+    'section',
+    'table',
+    'tbody',
+    'tfoot',
+    'thead',
+    'tr',
+    'ul',
+}
 
 # Elements that are never translated (and their children are skipped)
 SKIP_ELEMENTS = {'head', 'script', 'style', 'pre', 'code'}
@@ -85,29 +113,36 @@ class HTMLProcessor:
         name = tag.name.lower()
 
         # Basic translatable elements that are never containers
-        if name in {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'figcaption'}:
+        if name in {'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'figcaption'}:
             return True
 
-        # Blockquote: only translatable if it has NO translatable block children
+        # Blockquote: only translatable if it has no nested block descendants.
         if name == 'blockquote':
-            for child in tag.children:
-                if isinstance(child, Tag):
-                    child_name = child.name.lower()
-                    if child_name in TRANSLATABLE_ELEMENTS or child_name == 'div':
-                        return False
+            if self._has_block_descendants(tag):
+                return False
             return bool(tag.get_text(strip=True))
 
-        # Leaf div: div with no translatable block-element children
+        # Leaf div: div with no nested block descendants.
         if name == 'div':
-            for child in tag.children:
-                if isinstance(child, Tag):
-                    child_name = child.name.lower()
-                    if child_name in TRANSLATABLE_ELEMENTS or child_name == 'div':
-                        return False
-            # Has no block element children - check if it has text content
+            if self._has_block_descendants(tag):
+                return False
             text = tag.get_text(strip=True)
             return bool(text)
 
+        # List/table cells only translate when they are leaf-ish containers.
+        if name in {'li', 'td', 'th'}:
+            if self._has_block_descendants(tag):
+                return False
+            return bool(tag.get_text(strip=True))
+
+        return False
+
+    def _has_block_descendants(self, tag: Tag) -> bool:
+        """Return True when the tag contains nested block-level descendants."""
+        for child in tag.find_all(True):
+            child_name = child.name.lower() if child.name else ''
+            if child_name in BLOCK_DESCENDANTS:
+                return True
         return False
 
     def _is_in_skip_zone(self, tag: Tag) -> bool:
@@ -138,7 +173,7 @@ class HTMLProcessor:
         - Check for <a> tags that need special handling
         - Return None if no translatable text found.
         """
-        text = element.get_text(strip=True)
+        text = element.get_text(" ", strip=True)
         if not text:
             return None
 

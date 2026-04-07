@@ -64,9 +64,10 @@ class Checkpoint:
 
             # Verify source hash matches
             if loaded_data.get("source_hash") != self.source_hash:
-                print(f"Warning: Source file has changed since checkpoint was created.")
-                print(f"  Checkpoint: {self.path}")
-                print(f"  Consider starting fresh or using --force.")
+                raise ValueError(
+                    "Source file has changed since checkpoint was created. "
+                    f"Checkpoint: {self.path}. Start a fresh run instead."
+                )
 
             # Verify model matches
             if loaded_data.get("model") != self.model:
