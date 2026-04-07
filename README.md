@@ -9,6 +9,7 @@ A Python CLI tool that translates Project Gutenberg books from English to Romani
 - Automatic Gutenberg boilerplate detection and skipping
 - Simple write-back strategy: translated text replaces element content
 - Progress bar with optional debug output
+- Optional audiobook generation with Piper and ffmpeg
 - Telegram notifications on completion/interruption/error
 
 ## Installation
@@ -53,6 +54,12 @@ translate-book pg1342.html --debug
 
 # Use different model
 translate-book pg1342.html --model translategemma:12b
+
+# Generate translated HTML plus audiobook
+translate-book pg1342.html --audiobook \
+  --piper-bin ~/piper/piper \
+  --piper-model ~/piper/models/ro_RO-mihai-medium.onnx \
+  --piper-config ~/piper/models/ro_RO-mihai-medium.onnx.json
 ```
 
 ## Command Options
@@ -71,6 +78,13 @@ translate-book pg1342.html --model translategemma:12b
 | `--dry-run` | Parse and count chunks without translating |
 | `--skip-boilerplate` | Skip Gutenberg header/footer (default: on) |
 | `--force` | Overwrite output file without prompting |
+| `--audiobook` | Generate a final audiobook after translation |
+| `--audio-output` | Output audiobook file path (default: `{input_stem}_ro.m4b`) |
+| `--piper-bin` | Path to Piper executable (default: `piper`) |
+| `--piper-model` | Path to Piper voice model |
+| `--piper-config` | Path to Piper voice config |
+| `--ffmpeg-bin` | Path to `ffmpeg` (default: `ffmpeg`) |
+| `--keep-audio-segments` | Keep per-chunk WAV files after final assembly |
 
 ## How It Works
 

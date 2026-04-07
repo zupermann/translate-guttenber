@@ -10,17 +10,21 @@ and writes a translated HTML output file.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
+from audio_builder import AudioBuilder
+from speech_processor import SpeechProcessor
 from html_processor import Chunk, HTMLProcessor
 from translator import OllamaTranslator
 from checkpoint import Checkpoint
 from display import Display
 from boilerplate import mark_boilerplate
+from tts_engine import PiperTTS
 
 
 def notify_telegram(message: str) -> None:
@@ -131,6 +135,53 @@ Examples:
     )
 
     parser.add_argument(
+        "--audiobook",
+        action="store_true",
+        help="Generate a final audiobook after translation"
+    )
+
+    parser.add_argument(
+        "--audio-output",
+        type=Path,
+        default=None,
+        help="Final audiobook path. Default: {input_stem}_ro.m4b"
+    )
+
+    parser.add_argument(
+        "--piper-bin",
+        type=str,
+        default="piper",
+        help="Path to Piper executable. Default: piper"
+    )
+
+    parser.add_argument(
+        "--piper-model",
+        type=str,
+        default="~/piper/models/ro_RO-mihai-medium.onnx",
+        help="Path to Piper voice model. Default: ~/piper/models/ro_RO-mihai-medium.onnx"
+    )
+
+    parser.add_argument(
+        "--piper-config",
+        type=str,
+        default="~/piper/models/ro_RO-mihai-medium.onnx.json",
+        help="Path to Piper model config. Default: ~/piper/models/ro_RO-mihai-medium.onnx.json"
+    )
+
+    parser.add_argument(
+        "--ffmpeg-bin",
+        type=str,
+        default="ffmpeg",
+        help="Path to ffmpeg executable. Default: ffmpeg"
+    )
+
+    parser.add_argument(
+        "--keep-audio-segments",
+        action="store_true",
+        help="Keep per-chunk WAV files after audiobook assembly"
+    )
+
+    parser.add_argument(
         "--parallel",
         type=positive_int,
         default=2,
@@ -168,6 +219,80 @@ def translate_chunk(chunk: Chunk, translator: OllamaTranslator):
     return chunk, result
 
 
+def resolve_audio_output_path(input_file: Path, audio_output: Optional[Path]) -> Path:
+    """Resolve the final audiobook output path."""
+    if audio_output is not None:
+        return audio_output
+    return input_file.parent / f"{input_file.stem}_ro.m4b"
+
+
+def render_audiobook(
+    *,
+    input_stem: str,
+    chunks,
+    translations: Dict[int, str],
+    checkpoint: Checkpoint,
+    audio_output: Path,
+    piper_bin: str,
+    piper_model: str,
+    piper_config: str,
+    ffmpeg_bin: str,
+    keep_audio_segments: bool,
+) -> None:
+    """Render translated chunks into a single audiobook file."""
+    speech_processor = SpeechProcessor()
+    speech_chunks = speech_processor.build_speech_chunks(chunks, translations)
+
+    if not speech_chunks:
+        raise ValueError("No narration chunks were produced from the translated book")
+
+    tts = PiperTTS(piper_bin=piper_bin, model=piper_model, config=piper_config)
+    audio_builder = AudioBuilder(ffmpeg_bin=ffmpeg_bin)
+
+    segments_dir = audio_output.parent / f"{input_stem}_audio_segments"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint.configure_audio(
+        piper_bin=tts.piper_bin,
+        piper_model=str(tts.model),
+        piper_config=str(tts.config),
+        ffmpeg_bin=audio_builder.ffmpeg_bin,
+        segments_dir=segments_dir,
+        output_file=audio_output,
+        total_segments=len(speech_chunks),
+    )
+
+    segment_files: list[Path] = []
+    for speech_chunk in speech_chunks:
+        segment_path_str = checkpoint.get_audio_segment(speech_chunk.index)
+        segment_path = Path(segment_path_str) if segment_path_str else segments_dir / f"{speech_chunk.index:05d}.wav"
+
+        if checkpoint.audio_is_done(speech_chunk.index) and segment_path.exists():
+            segment_files.append(segment_path)
+            print(
+                f"Audio progress: {len(segment_files)}/{len(speech_chunks)} segments ready",
+                file=sys.stderr,
+                end="\r",
+            )
+            continue
+
+        tts.synthesize(speech_chunk.text, segment_path)
+        checkpoint.save_audio(speech_chunk.index, segment_path, len(speech_chunks))
+        segment_files.append(segment_path)
+        print(
+            f"Audio progress: {len(segment_files)}/{len(speech_chunks)} segments ready",
+            file=sys.stderr,
+            end="\r",
+        )
+
+    print(file=sys.stderr)
+
+    audio_builder.concat(segment_files, audio_output)
+
+    if not keep_audio_segments:
+        shutil.rmtree(segments_dir, ignore_errors=True)
+
+
 def main() -> int:
     """Main entry point."""
     parser = build_parser()
@@ -197,6 +322,10 @@ def main() -> int:
     if args.checkpoint is None:
         checkpoint_name = f"{input_stem}_checkpoint.json"
         args.checkpoint = args.input_file.parent / checkpoint_name
+
+    # 3b. Resolve audiobook output path if requested
+    if args.audiobook:
+        args.audio_output = resolve_audio_output_path(args.input_file, args.audio_output)
 
     # 4. Initialize OllamaTranslator and check_connection()
     translator = OllamaTranslator(
@@ -275,6 +404,11 @@ def main() -> int:
     # 10. Check if output file exists (unless --force or --resume)
     if args.output.exists() and not args.force and not args.resume:
         print(f"Error: Output file already exists: {args.output}", file=sys.stderr)
+        print("Use --force to overwrite or --resume to continue from checkpoint.", file=sys.stderr)
+        return 1
+
+    if args.audiobook and args.audio_output.exists() and not args.force and not args.resume:
+        print(f"Error: Audio output file already exists: {args.audio_output}", file=sys.stderr)
         print("Use --force to overwrite or --resume to continue from checkpoint.", file=sys.stderr)
         return 1
 
@@ -401,15 +535,44 @@ def main() -> int:
         notify_telegram(msg)
         return 1
 
-    # 15. Delete checkpoint file on successful completion
-    checkpoint.delete()
-
     # Close display and print summary
     display.close()
     print(f"\nTranslation complete: {args.output}", file=sys.stderr)
 
-    # Notify on successful completion
-    notify_telegram(f"Translation COMPLETE: {args.input_file.name} -> {args.output.name}")
+    if not args.audiobook:
+        # Delete checkpoint file on successful translation-only completion
+        checkpoint.delete()
+        notify_telegram(f"Translation COMPLETE: {args.input_file.name} -> {args.output.name}")
+        return 0
+
+    try:
+        render_audiobook(
+            input_stem=input_stem,
+            chunks=chunks,
+            translations=translations,
+            checkpoint=checkpoint,
+            audio_output=args.audio_output,
+            piper_bin=args.piper_bin,
+            piper_model=args.piper_model,
+            piper_config=args.piper_config,
+            ffmpeg_bin=args.ffmpeg_bin,
+            keep_audio_segments=args.keep_audio_segments,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        msg = (
+            f"Audiobook FAILED: {args.input_file.name} could not be rendered: {e}. "
+            "Resume with --resume after fixing the issue."
+        )
+        print(f"Error: {e}", file=sys.stderr)
+        notify_telegram(msg)
+        return 1
+
+    checkpoint.delete()
+
+    print(f"Audiobook complete: {args.audio_output}", file=sys.stderr)
+    notify_telegram(
+        f"Audiobook COMPLETE: {args.input_file.name} -> {args.output.name} + {args.audio_output.name}"
+    )
 
     return 0
 
