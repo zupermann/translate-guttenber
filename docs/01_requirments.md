@@ -150,9 +150,9 @@ Must not:
 ### TTS Generation
 
 - Keep Piper as a supported external CLI dependency.
-- Add XTTS-v2 support through the `tts-ro` external CLI.
+- Make XTTS-v2 the default audiobook engine through the `tts-ro` external CLI.
 - Generate one WAV file per speech chunk.
-- Allow the user to select the TTS engine at the CLI level.
+- Allow the user to select the TTS engine at the CLI level, with XTTS-v2 as the default.
 - Require configurable paths/settings for the selected engine:
   - Piper executable
   - Piper model

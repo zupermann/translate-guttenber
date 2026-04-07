@@ -154,7 +154,7 @@ Add:
 
 - a selectable engine abstraction
 - existing Piper support
-- `tts-ro` XTTS-v2 support with pass-through CLI parameters
+- `tts-ro` XTTS-v2 support with pass-through CLI parameters, and XTTS as the default engine
 - engine-specific defaults such as XTTS parallel worker count and speech chunking profile
 
 ***

@@ -17,7 +17,7 @@ from speech_processor import SpeechChunkingOptions
 class TTSConfig:
     """User-facing configuration for audiobook synthesis."""
 
-    engine: str = "piper"
+    engine: str = "xtts-ro"
     parallelism: Optional[int] = None
     piper_bin: str = "piper"
     piper_model: str = "~/piper/models/ro_RO-mihai-medium.onnx"

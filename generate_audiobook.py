@@ -53,14 +53,14 @@ Examples:
     parser.add_argument(
         "--tts-engine",
         choices=("piper", "xtts-ro"),
-        default="piper",
-        help="TTS backend to use. Default: piper",
+        default="xtts-ro",
+        help="TTS backend to use. Default: xtts-ro",
     )
     parser.add_argument(
         "--tts-parallel",
         type=positive_int,
         default=None,
-        help="Number of parallel TTS workers. Default: 1 for Piper, 8 for xtts-ro",
+        help="Number of parallel TTS workers. Default: 8 for xtts-ro, 1 for Piper",
     )
     parser.add_argument(
         "--piper-bin",

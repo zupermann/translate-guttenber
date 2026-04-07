@@ -3,7 +3,7 @@
 This repository provides three cleanly separated CLIs for Project Gutenberg HTML books:
 
 - `translate-book` translates English HTML into Romanian HTML with Ollama
-- `generate-audiobook` turns narration-ready HTML into an audiobook with a selectable TTS backend + ffmpeg
+- `generate-audiobook` turns narration-ready HTML into an audiobook with XTTS-V2 by default, plus Piper as a fallback + ffmpeg
 - `book-pipeline` orchestrates both steps automatically
 
 The CLIs share parsing and pipeline modules, but each command has a single responsibility.
@@ -13,7 +13,7 @@ The CLIs share parsing and pipeline modules, but each command has a single respo
 - HTML-first processing for Gutenberg books
 - Chunk-based translation with resumable checkpoints
 - Separate audiobook generation from already-translated HTML
-- Per-chunk WAV synthesis with Piper or XTTS-v2 (`tts-ro`)
+- Per-chunk WAV synthesis with XTTS-v2 (`tts-ro`) by default, with Piper still available
 - XTTS-oriented speech cleanup for digits, symbols, and short phrase splitting
 - Parallel XTTS rendering to better utilize available GPU memory
 - Brief pauses after heading chunks for more natural narration
@@ -38,7 +38,7 @@ This installs three commands into `~/.local/bin`:
 
 - Python 3.x
 - Ollama running locally with a TranslateGemma model for translation
-- Piper installed locally for legacy TTS, or `tts-ro` installed locally for XTTS-v2
+- `tts-ro` installed locally for XTTS-v2, with Piper available as a legacy fallback
 - `ffmpeg` installed locally for final audio assembly
 - Python dependencies from `requirements.txt`
 
@@ -60,6 +60,7 @@ Outputs translated HTML such as `pg8492-images_ro.html`.
 ```bash
 generate-audiobook pg8492-images_ro.html
 generate-audiobook pg8492-images_ro.html -o pg8492-images_ro.m4b --resume
+generate-audiobook pg8492-images_ro.html --tts-engine xtts-ro
 generate-audiobook pg8492-images_ro.html \
   --piper-bin ~/piper/piper \
   --piper-model ~/piper/models/ro_RO-mihai-medium.onnx \
@@ -73,13 +74,14 @@ generate-audiobook pg8492-images_ro.html \
 ```
 
 This command expects narration-ready HTML, typically the translated HTML from `translate-book`.
-When `--tts-engine xtts-ro` is selected, the pipeline shortens phrases aggressively, verbalizes digits into Romanian words, strips unsupported symbols, and forwards XTTS options like `--speaker-wav`, `--voice`, `--cache-dir`, `--device`, `--tts-temperature`, `--tts-top-p`, `--tts-top-k`, `--tts-length-penalty`, and `--tts-repetition-penalty`.
+XTTS-V2 is the default engine, so the pipeline shortens phrases aggressively, verbalizes digits into Romanian words, strips unsupported symbols, and forwards XTTS options like `--speaker-wav`, `--voice`, `--cache-dir`, `--device`, `--tts-temperature`, `--tts-top-p`, `--tts-top-k`, `--tts-length-penalty`, and `--tts-repetition-penalty`.
 
 ### 3. End-to-End Orchestration
 
 ```bash
 book-pipeline pg8492-images.html
 book-pipeline pg8492-images.html --resume
+book-pipeline pg8492-images.html --tts-engine xtts-ro
 book-pipeline pg8492-images.html \
   --translation-output pg8492-images_ro.html \
   --audio-output pg8492-images_ro.m4b
@@ -106,7 +108,7 @@ This command translates first, then feeds the translated HTML into the audiobook
 1. Parse the translated HTML.
 2. Extract the same readable block chunks.
 3. Normalize text for narration.
-4. For XTTS, split long text into short speech-safe Romanian phrases and add pause metadata.
+4. For XTTS-V2, split long text into short speech-safe Romanian phrases and add pause metadata.
 5. Generate one WAV file per speech chunk with the selected TTS engine.
 6. Concatenate the WAV files into the final audiobook with `ffmpeg`.
 
