@@ -26,6 +26,7 @@ class SpeechChunk:
     element_type: str
     text: str
     is_chapter_title: bool = False
+    pause_after_seconds: float = 0.0
 
 
 class SpeechProcessor:
@@ -50,10 +51,16 @@ class SpeechProcessor:
                     element_type=chunk.element_type,
                     text=cleaned,
                     is_chapter_title=chunk.element_type.lower() in self.HEADING_TAGS,
+                    pause_after_seconds=0.75 if chunk.element_type.lower() in self.HEADING_TAGS else 0.0,
                 )
             )
 
         return speech_chunks
+
+    def build_speech_chunks_from_source(self, chunks: List[Any]) -> List[SpeechChunk]:
+        """Build speech chunks directly from chunk plain text."""
+        source_texts = {chunk.index: chunk.plain_text for chunk in chunks}
+        return self.build_speech_chunks(chunks, source_texts)
 
     def normalize_for_speech(self, text: str) -> str:
         """Strip obvious HTML artifacts and narration noise from text."""

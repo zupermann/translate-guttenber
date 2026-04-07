@@ -1,6 +1,6 @@
 #!/bin/bash
-# Wrapper script for translate-book
+# Wrapper script for book-pipeline
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$PROJECT_DIR/venv/bin/activate"
-python3 "$PROJECT_DIR/translate_book.py" "$@"
+python3 "$PROJECT_DIR/book_pipeline.py" "$@"

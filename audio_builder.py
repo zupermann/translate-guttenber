@@ -3,6 +3,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import wave
 from typing import Sequence
 
 
@@ -63,6 +64,16 @@ class AudioBuilder:
                 resolved = Path(segment).resolve()
                 handle.write(f"file '{self._escape_concat_path(str(resolved))}'\n")
         return manifest_path
+
+    def create_silence_wav(self, output_file: Path, duration_seconds: float, sample_rate: int = 22050) -> None:
+        """Create a silent WAV file for a short pause in narration."""
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        frame_count = max(1, int(sample_rate * max(duration_seconds, 0.0)))
+        with wave.open(str(output_file), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(sample_rate)
+            handle.writeframes(b"\x00\x00" * frame_count)
 
     def _escape_concat_path(self, value: str) -> str:
         return value.replace("'", r"'\''")

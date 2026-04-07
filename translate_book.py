@@ -1,44 +1,17 @@
 #!/usr/bin/env python3
-"""
-Book Translation CLI - Translate Project Gutenberg books from English to Romanian.
-
-A Python CLI tool that translates Project Gutenberg books from English to Romanian
-using a local Ollama TranslateGemma model. The tool accepts an HTML source file,
-translates all human-readable text while preserving the complete HTML structure,
-and writes a translated HTML output file.
-"""
+"""Translation-only CLI for Project Gutenberg HTML books."""
 
 import argparse
-import os
-import shutil
-import subprocess
 import sys
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Dict, Optional
 
-from audio_builder import AudioBuilder
-from speech_processor import SpeechProcessor
-from html_processor import Chunk, HTMLProcessor
-from translator import OllamaTranslator
-from checkpoint import Checkpoint
-from display import Display
-from boilerplate import mark_boilerplate
-from tts_engine import PiperTTS
-
-
-def notify_telegram(message: str) -> None:
-    """Send a Telegram notification using the system alias."""
-    try:
-        subprocess.run(
-            [os.path.expanduser('~/.local/bin/telegram-notify'), message],
-            shell=False,
-            check=False,
-            capture_output=True
-        )
-    except Exception:
-        # Silently ignore notification failures - don't block translation
-        pass
+from cli_utils import notify_telegram, positive_int
+from translation_pipeline import (
+    collect_translation_dry_run,
+    default_translation_checkpoint_path,
+    default_translation_output_path,
+    translate_html_book,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,245 +25,74 @@ Examples:
   %(prog)s pg1342.html -o pride_prejudice_ro.html --debug
   %(prog)s pg1342.html --resume
   %(prog)s pg1342.html --dry-run
-        """
+        """,
     )
 
+    parser.add_argument("input_file", type=Path, help="Path to the source HTML file")
     parser.add_argument(
-        "input_file",
-        type=Path,
-        help="Path to the source HTML file"
-    )
-
-    parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         default=None,
-        help="Output HTML file path. Default: {input_stem}_ro.html in the same directory"
+        help="Output HTML file path. Default: {input_stem}_ro.html in the same directory",
     )
-
     parser.add_argument(
-        "--model", "-m",
+        "--model",
+        "-m",
         type=str,
         default="translategemma:27b",
-        help="Ollama model name. Default: translategemma:27b"
+        help="Ollama model name. Default: translategemma:27b",
     )
-
     parser.add_argument(
         "--ollama-url",
         type=str,
         default="http://localhost:11434",
-        help="Ollama base URL. Default: http://localhost:11434"
+        help="Ollama base URL. Default: http://localhost:11434",
     )
-
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.3,
-        help="Temperature for translation. Default: 0.3"
+        help="Temperature for translation. Default: 0.3",
     )
-
     parser.add_argument(
         "--num-ctx",
         type=int,
         default=8192,
-        help="Context window size. Default: 8192"
+        help="Context window size. Default: 8192",
     )
-
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=None,
-        help="Path to checkpoint JSON file. Default: {input_stem}_checkpoint.json"
+        help="Path to checkpoint JSON file. Default: {input_stem}_checkpoint.json",
     )
-
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from existing checkpoint if present"
-    )
-
+    parser.add_argument("--resume", action="store_true", help="Resume from existing checkpoint if present")
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode: log source and translation side-by-side to stderr"
+        help="Enable debug mode: log source and translation side-by-side to stderr",
     )
-
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse and count chunks, print stats, do not call the model"
+        help="Parse and count chunks, print stats, do not call the model",
     )
-
     parser.add_argument(
         "--skip-boilerplate",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Auto-detect and skip Gutenberg header/footer boilerplate (default: --skip-boilerplate)"
+        help="Auto-detect and skip Gutenberg header/footer boilerplate (default: --skip-boilerplate)",
     )
-
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite output file without prompting"
-    )
-
-    parser.add_argument(
-        "--audiobook",
-        action="store_true",
-        help="Generate a final audiobook after translation"
-    )
-
-    parser.add_argument(
-        "--audio-output",
-        type=Path,
-        default=None,
-        help="Final audiobook path. Default: {input_stem}_ro.m4b"
-    )
-
-    parser.add_argument(
-        "--piper-bin",
-        type=str,
-        default="piper",
-        help="Path to Piper executable. Default: piper"
-    )
-
-    parser.add_argument(
-        "--piper-model",
-        type=str,
-        default="~/piper/models/ro_RO-mihai-medium.onnx",
-        help="Path to Piper voice model. Default: ~/piper/models/ro_RO-mihai-medium.onnx"
-    )
-
-    parser.add_argument(
-        "--piper-config",
-        type=str,
-        default="~/piper/models/ro_RO-mihai-medium.onnx.json",
-        help="Path to Piper model config. Default: ~/piper/models/ro_RO-mihai-medium.onnx.json"
-    )
-
-    parser.add_argument(
-        "--ffmpeg-bin",
-        type=str,
-        default="ffmpeg",
-        help="Path to ffmpeg executable. Default: ffmpeg"
-    )
-
-    parser.add_argument(
-        "--keep-audio-segments",
-        action="store_true",
-        help="Keep per-chunk WAV files after audiobook assembly"
-    )
-
+    parser.add_argument("--force", action="store_true", help="Overwrite output file without prompting")
     parser.add_argument(
         "--parallel",
         type=positive_int,
         default=2,
-        help="Number of parallel translation workers. Default: 2"
+        help="Number of parallel translation workers. Default: 2",
     )
 
     return parser
-
-
-def estimate_tokens(text: str) -> int:
-    """Estimate token count using word count heuristic."""
-    return int(len(text.split()) * 1.3)
-
-
-def positive_int(value: str) -> int:
-    """Argparse helper for positive integers."""
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return parsed
-
-
-def translate_chunk(chunk: Chunk, translator: OllamaTranslator):
-    """
-    Translate a single chunk. Used by ThreadPoolExecutor.
-
-    Args:
-        chunk: The chunk to translate
-        translator: The translator instance
-
-    Returns:
-        tuple: (chunk, result) where result is TranslationResult
-    """
-    result = translator.translate(text=chunk.plain_text)
-    return chunk, result
-
-
-def resolve_audio_output_path(input_file: Path, audio_output: Optional[Path]) -> Path:
-    """Resolve the final audiobook output path."""
-    if audio_output is not None:
-        return audio_output
-    return input_file.parent / f"{input_file.stem}_ro.m4b"
-
-
-def render_audiobook(
-    *,
-    input_stem: str,
-    chunks,
-    translations: Dict[int, str],
-    checkpoint: Checkpoint,
-    audio_output: Path,
-    piper_bin: str,
-    piper_model: str,
-    piper_config: str,
-    ffmpeg_bin: str,
-    keep_audio_segments: bool,
-) -> None:
-    """Render translated chunks into a single audiobook file."""
-    speech_processor = SpeechProcessor()
-    speech_chunks = speech_processor.build_speech_chunks(chunks, translations)
-
-    if not speech_chunks:
-        raise ValueError("No narration chunks were produced from the translated book")
-
-    tts = PiperTTS(piper_bin=piper_bin, model=piper_model, config=piper_config)
-    audio_builder = AudioBuilder(ffmpeg_bin=ffmpeg_bin)
-
-    segments_dir = audio_output.parent / f"{input_stem}_audio_segments"
-    segments_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpoint.configure_audio(
-        piper_bin=tts.piper_bin,
-        piper_model=str(tts.model),
-        piper_config=str(tts.config),
-        ffmpeg_bin=audio_builder.ffmpeg_bin,
-        segments_dir=segments_dir,
-        output_file=audio_output,
-        total_segments=len(speech_chunks),
-    )
-
-    segment_files: list[Path] = []
-    for speech_chunk in speech_chunks:
-        segment_path_str = checkpoint.get_audio_segment(speech_chunk.index)
-        segment_path = Path(segment_path_str) if segment_path_str else segments_dir / f"{speech_chunk.index:05d}.wav"
-
-        if checkpoint.audio_is_done(speech_chunk.index) and segment_path.exists():
-            segment_files.append(segment_path)
-            print(
-                f"Audio progress: {len(segment_files)}/{len(speech_chunks)} segments ready",
-                file=sys.stderr,
-                end="\r",
-            )
-            continue
-
-        tts.synthesize(speech_chunk.text, segment_path)
-        checkpoint.save_audio(speech_chunk.index, segment_path, len(speech_chunks))
-        segment_files.append(segment_path)
-        print(
-            f"Audio progress: {len(segment_files)}/{len(speech_chunks)} segments ready",
-            file=sys.stderr,
-            end="\r",
-        )
-
-    print(file=sys.stderr)
-
-    audio_builder.concat(segment_files, audio_output)
-
-    if not keep_audio_segments:
-        shutil.rmtree(segments_dir, ignore_errors=True)
 
 
 def main() -> int:
@@ -298,282 +100,64 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    # 1. Validate input file exists and is HTML
-    if not args.input_file.exists():
-        print(f"Error: Input file not found: {args.input_file}", file=sys.stderr)
-        return 1
-
-    if not args.input_file.is_file():
-        print(f"Error: Input path is not a file: {args.input_file}", file=sys.stderr)
-        return 1
-
-    if args.input_file.suffix.lower() not in ('.html', '.htm'):
-        print(f"Warning: Input file does not have .html/.htm extension: {args.input_file}", file=sys.stderr)
-
-    # Compute input stem once for reuse
-    input_stem = args.input_file.stem
-
-    # 2. Resolve output path (default: same dir, _ro suffix)
     if args.output is None:
-        output_name = f"{input_stem}_ro.html"
-        args.output = args.input_file.parent / output_name
+        args.output = default_translation_output_path(args.input_file)
 
-    # 3. Resolve checkpoint path
     if args.checkpoint is None:
-        checkpoint_name = f"{input_stem}_checkpoint.json"
-        args.checkpoint = args.input_file.parent / checkpoint_name
+        args.checkpoint = default_translation_checkpoint_path(args.input_file)
 
-    # 3b. Resolve audiobook output path if requested
-    if args.audiobook:
-        args.audio_output = resolve_audio_output_path(args.input_file, args.audio_output)
+    if args.resume and not args.checkpoint.exists() and args.output.exists():
+        print(f"Translation already complete: {args.output}", file=sys.stderr)
+        return 0
 
-    # 4. Initialize OllamaTranslator and check_connection()
-    translator = OllamaTranslator(
-        base_url=args.ollama_url,
-        model=args.model,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-    )
-
-    if not args.dry_run:
-        try:
-            translator.check_connection()
-        except ConnectionError as e:
-            msg = f"Translation failed: Ollama connection error for {args.input_file.name}"
-            print(f"Error: {e}", file=sys.stderr)
-            notify_telegram(msg)
-            return 1
-        except ValueError as e:
-            msg = f"Translation failed: Model error for {args.input_file.name}"
-            print(f"Error: {e}", file=sys.stderr)
-            notify_telegram(msg)
-            return 1
-
-    # 5. Read input HTML
-    try:
-        with open(args.input_file, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-    except IOError as e:
-        msg = f"Translation failed: Cannot read {args.input_file.name}"
-        print(f"Error reading input file: {e}", file=sys.stderr)
-        notify_telegram(msg)
-        return 1
-
-    # 6. Process HTML
-    processor = HTMLProcessor(html_content)
-
-    # 6b. Run boilerplate.mark_boilerplate(soup)
-    if args.skip_boilerplate:
-        mark_boilerplate(processor.get_soup())
-
-    # 7. Run processor.extract_chunks() -> chunks list
-    chunks = processor.extract_chunks()
-
-    # 8. If --dry-run: print stats and exit
     if args.dry_run:
-        total_est_tokens = sum(estimate_tokens(chunk.plain_text) for chunk in chunks)
-        est_output_tokens = int(total_est_tokens * 1.1)  # EN->RO expansion
-        est_time = total_est_tokens / 40  # Assume 40 tok/s
+        try:
+            summary = collect_translation_dry_run(
+                args.input_file,
+                skip_boilerplate=args.skip_boilerplate,
+            )
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
         print("\nDry run summary")
         print("─" * 40)
-        print(f"Source file:      {args.input_file}")
-        print(f"Total chunks:     {len(chunks)}")
-        print(f"Est. input tok:   {total_est_tokens:,}")
-        print(f"Est. output tok:  {est_output_tokens:,}")
-        print(f"Est. time @ 40/s: ~{int(est_time // 60)}m {int(est_time % 60)}s")
+        print(f"Source file:      {summary.input_file}")
+        print(f"Total chunks:     {summary.total_chunks}")
+        print(f"Est. input tok:   {summary.estimated_input_tokens:,}")
+        print(f"Est. output tok:  {summary.estimated_output_tokens:,}")
+        print(
+            f"Est. time @ 40/s: ~{int(summary.estimated_seconds // 60)}m {int(summary.estimated_seconds % 60)}s"
+        )
         print("")
         return 0
 
-    # 9. Load or create Checkpoint
-    checkpoint = Checkpoint(args.checkpoint, args.input_file, args.model)
-    if args.resume:
-        try:
-            loaded = checkpoint.load()
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-
-        if not loaded:
-            print(
-                f"Error: Resume requested but no valid checkpoint could be loaded from {args.checkpoint}",
-                file=sys.stderr
-            )
-            return 1
-
-    # 10. Check if output file exists (unless --force or --resume)
-    if args.output.exists() and not args.force and not args.resume:
-        print(f"Error: Output file already exists: {args.output}", file=sys.stderr)
-        print("Use --force to overwrite or --resume to continue from checkpoint.", file=sys.stderr)
-        return 1
-
-    if args.audiobook and args.audio_output.exists() and not args.force and not args.resume:
-        print(f"Error: Audio output file already exists: {args.audio_output}", file=sys.stderr)
-        print("Use --force to overwrite or --resume to continue from checkpoint.", file=sys.stderr)
-        return 1
-
-    # 11. Initialize Display(total=len(chunks), debug=args.debug)
-    display = Display(total_chunks=len(chunks), debug=args.debug)
-
-    # 12. Main translation loop with parallel execution
-    translations: Dict[int, str] = {}
-
-    # Get list of pending chunks (not already done)
-    pending = [c for c in chunks if not checkpoint.is_done(c.index)]
-
-    # Load cached chunks into translations dict first
-    for chunk in chunks:
-        if checkpoint.is_done(chunk.index):
-            translations[chunk.index] = checkpoint.get_translation(chunk.index)
-            display.update_cached(chunk.index)
-
-    shutdown_requested = False
-    interrupted = False
-    failure_message = None
-    executor = ThreadPoolExecutor(max_workers=args.parallel)
-
     try:
-        pending_iter = iter(pending)
-        in_flight = {}
-
-        def submit_next() -> bool:
-            """Keep the executor pipeline full without queueing the whole job."""
-            chunk = next(pending_iter, None)
-            if chunk is None:
-                return False
-            in_flight[executor.submit(translate_chunk, chunk, translator)] = chunk
-            return True
-
-        for _ in range(min(args.parallel, len(pending))):
-            if not submit_next():
-                break
-
-        while in_flight:
-            done, _ = wait(set(in_flight.keys()), return_when=FIRST_COMPLETED)
-
-            for future in done:
-                chunk = in_flight.pop(future)
-                try:
-                    _, result = future.result()
-                except Exception as e:
-                    from translator import TranslationResult
-                    result = TranslationResult(
-                        translated_text=chunk.plain_text,
-                        success=False,
-                        error_message=str(e)
-                    )
-
-                if not result.success:
-                    failure_message = (
-                        f"Translation FAILED: Chunk {chunk.index} in {args.input_file.name} "
-                        f"failed: {result.error_message}. Resume with --resume after fixing the issue."
-                    )
-                    print(f"\nError: Chunk {chunk.index} failed: {result.error_message}", file=sys.stderr)
-                    print("Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
-                    shutdown_requested = True
-                    break
-
-                translations[chunk.index] = result.translated_text
-                checkpoint.save(chunk.index, result.translated_text, len(chunks))
-                display.update(
-                    chunk_index=chunk.index,
-                    element_type=chunk.element_type,
-                    source_text=chunk.plain_text,
-                    translated_text=result.translated_text,
-                    duration=result.duration_seconds,
-                    tokens=result.output_tokens
-                )
-
-                submit_next()
-
-            if shutdown_requested:
-                break
-
+        result = translate_html_book(
+            input_file=args.input_file,
+            output_file=args.output,
+            checkpoint_path=args.checkpoint,
+            model=args.model,
+            ollama_url=args.ollama_url,
+            temperature=args.temperature,
+            num_ctx=args.num_ctx,
+            resume=args.resume,
+            debug=args.debug,
+            skip_boilerplate=args.skip_boilerplate,
+            force=args.force,
+            parallel=args.parallel,
+        )
     except KeyboardInterrupt:
-        interrupted = True
-        print("\n\nInterrupted! Progress saved to checkpoint.", file=sys.stderr)
-        failure_message = f"Translation PAUSED: {args.input_file.name} interrupted. Resume with --resume."
-
-    finally:
-        executor.shutdown(
-            wait=not shutdown_requested and not interrupted,
-            cancel_futures=shutdown_requested or interrupted
-        )
-
-    if shutdown_requested:
-        display.close()
-        if failure_message:
-            notify_telegram(failure_message)
-        return 1
-
-    if interrupted:
-        display.close()
-        if failure_message:
-            notify_telegram(failure_message)
+        print("\nInterrupted! Progress was saved to checkpoint.", file=sys.stderr)
+        notify_telegram(f"Translation PAUSED: {args.input_file.name} interrupted. Resume with --resume.")
         return 130
-
-    # 13. processor.apply_translations(translations)
-    try:
-        processor.apply_translations(translations)
-    except Exception as e:
-        msg = f"Translation FAILED: Cannot apply translations for {args.input_file.name}: {e}. Resume with --resume after fixing the issue."
-        print(f"\nError: {e}", file=sys.stderr)
-        print(f"Progress saved to checkpoint. Fix the issue and resume with --resume.", file=sys.stderr)
-        display.close()
-        notify_telegram(msg)
+    except (ConnectionError, FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        notify_telegram(f"Translation FAILED: {args.input_file.name} could not be translated: {exc}")
         return 1
 
-    # 14. Write output HTML file (UTF-8, update lang="ro")
-    try:
-        output_html = processor.serialize()
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(output_html)
-    except IOError as e:
-        msg = f"Translation FAILED: Cannot write output for {args.input_file.name}"
-        print(f"Error writing output file: {e}", file=sys.stderr)
-        display.close()
-        notify_telegram(msg)
-        return 1
-
-    # Close display and print summary
-    display.close()
-    print(f"\nTranslation complete: {args.output}", file=sys.stderr)
-
-    if not args.audiobook:
-        # Delete checkpoint file on successful translation-only completion
-        checkpoint.delete()
-        notify_telegram(f"Translation COMPLETE: {args.input_file.name} -> {args.output.name}")
-        return 0
-
-    try:
-        render_audiobook(
-            input_stem=input_stem,
-            chunks=chunks,
-            translations=translations,
-            checkpoint=checkpoint,
-            audio_output=args.audio_output,
-            piper_bin=args.piper_bin,
-            piper_model=args.piper_model,
-            piper_config=args.piper_config,
-            ffmpeg_bin=args.ffmpeg_bin,
-            keep_audio_segments=args.keep_audio_segments,
-        )
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        msg = (
-            f"Audiobook FAILED: {args.input_file.name} could not be rendered: {e}. "
-            "Resume with --resume after fixing the issue."
-        )
-        print(f"Error: {e}", file=sys.stderr)
-        notify_telegram(msg)
-        return 1
-
-    checkpoint.delete()
-
-    print(f"Audiobook complete: {args.audio_output}", file=sys.stderr)
-    notify_telegram(
-        f"Audiobook COMPLETE: {args.input_file.name} -> {args.output.name} + {args.audio_output.name}"
-    )
-
+    print(f"\nTranslation complete: {result.output_file}", file=sys.stderr)
+    notify_telegram(f"Translation COMPLETE: {args.input_file.name} -> {result.output_file.name}")
     return 0
 
 

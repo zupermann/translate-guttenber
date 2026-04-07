@@ -1,115 +1,123 @@
-# Book Translation CLI
+# Book Translation and Audiobook Tooling
 
-A Python CLI tool that translates Project Gutenberg books from English to Romanian using a local Ollama TranslateGemma model.
+This repository provides three cleanly separated CLIs for Project Gutenberg HTML books:
+
+- `translate-book` translates English HTML into Romanian HTML with Ollama
+- `generate-audiobook` turns narration-ready HTML into an audiobook with Piper + ffmpeg
+- `book-pipeline` orchestrates both steps automatically
+
+The CLIs share parsing and pipeline modules, but each command has a single responsibility.
 
 ## Features
 
-- Translates Gutenberg HTML in chunked plain-text blocks while keeping document-level structure
-- Chunk-based processing with checkpointing for resumable translations
-- Automatic Gutenberg boilerplate detection and skipping
-- Simple write-back strategy: translated text replaces element content
-- Progress bar with optional debug output
-- Optional audiobook generation with Piper and ffmpeg
-- Telegram notifications on completion/interruption/error
+- HTML-first processing for Gutenberg books
+- Chunk-based translation with resumable checkpoints
+- Separate audiobook generation from already-translated HTML
+- Per-chunk WAV synthesis with Piper
+- Brief pauses after heading chunks for more natural narration
+- Final audiobook assembly with `ffmpeg`
+- Orchestrated end-to-end workflow when you want one command
 
 ## Installation
 
-Run the install script to set up the alias:
-
 ```bash
 ./install.sh
+# then source your shell rc file, for example:
+source ~/.zshrc
 ```
 
-This will:
-- Check dependencies
-- Create a `translate-book` alias in your `.bashrc`
+This installs three commands into `~/.local/bin`:
 
-After running the script, open a new terminal or run `source ~/.bashrc` to use the alias.
+- `translate-book`
+- `generate-audiobook`
+- `book-pipeline`
 
 ## Requirements
 
 - Python 3.x
-- Ollama running locally with TranslateGemma model
-- Dependencies: `pip install -r requirements.txt`
+- Ollama running locally with a TranslateGemma model for translation
+- Piper installed locally for TTS
+- `ffmpeg` installed locally for final audio assembly
+- Python dependencies from `requirements.txt`
 
-## Usage
+## Commands
 
-After installation, use the `translate-book` alias:
+### 1. Translation Only
 
 ```bash
-# Basic translation
-translate-book pg1342.html
-
-# With custom output
-translate-book pg1342.html -o pride_prejudice_ro.html
-
-# Resume interrupted translation
-translate-book pg1342.html --resume
-
-# Dry run to estimate chunks and time
-translate-book pg1342.html --dry-run
-
-# Enable debug output
-translate-book pg1342.html --debug
-
-# Use different model
-translate-book pg1342.html --model translategemma:12b
-
-# Generate translated HTML plus audiobook
-translate-book pg1342.html --audiobook \
-  --piper-bin ~/piper/piper \
-  --piper-model ~/piper/models/ro_RO-mihai-medium.onnx \
-  --piper-config ~/piper/models/ro_RO-mihai-medium.onnx.json
+translate-book pg8492-images.html
+translate-book pg8492-images.html -o pg8492-images_ro.html --debug
+translate-book pg8492-images.html --resume
+translate-book pg8492-images.html --dry-run
 ```
 
-## Command Options
+Outputs translated HTML such as `pg8492-images_ro.html`.
 
-| Option | Description |
-|--------|-------------|
-| `input_file` | Path to source HTML file |
-| `-o, --output` | Output HTML file path (default: `{input}_ro.html`) |
-| `-m, --model` | Ollama model name (default: `translategemma:27b`) |
-| `--ollama-url` | Ollama base URL (default: `http://localhost:11434`) |
-| `--temperature` | Temperature for translation (default: 0.3) |
-| `--num-ctx` | Context window size (default: 8192) |
-| `--checkpoint` | Path to checkpoint JSON file |
-| `--resume` | Resume from existing checkpoint |
-| `--debug` | Enable debug logging to stderr |
-| `--dry-run` | Parse and count chunks without translating |
-| `--skip-boilerplate` | Skip Gutenberg header/footer (default: on) |
-| `--force` | Overwrite output file without prompting |
-| `--audiobook` | Generate a final audiobook after translation |
-| `--audio-output` | Output audiobook file path (default: `{input_stem}_ro.m4b`) |
-| `--piper-bin` | Path to Piper executable (default: `piper`) |
-| `--piper-model` | Path to Piper voice model |
-| `--piper-config` | Path to Piper voice config |
-| `--ffmpeg-bin` | Path to `ffmpeg` (default: `ffmpeg`) |
-| `--keep-audio-segments` | Keep per-chunk WAV files after final assembly |
+### 2. Audiobook Only
+
+```bash
+generate-audiobook pg8492-images_ro.html
+generate-audiobook pg8492-images_ro.html -o pg8492-images_ro.m4b --resume
+generate-audiobook pg8492-images_ro.html \
+  --piper-bin ~/piper/piper \
+  --piper-model ~/piper/models/ro_RO-mihai-medium.onnx \
+  --piper-config ~/piper/models/ro_RO-mihai-medium.onnx.json \
+  --heading-pause-seconds 0.75
+```
+
+This command expects narration-ready HTML, typically the translated HTML from `translate-book`.
+
+### 3. End-to-End Orchestration
+
+```bash
+book-pipeline pg8492-images.html
+book-pipeline pg8492-images.html --resume
+book-pipeline pg8492-images.html \
+  --translation-output pg8492-images_ro.html \
+  --audio-output pg8492-images_ro.m4b
+```
+
+This command translates first, then feeds the translated HTML into the audiobook CLI logic.
 
 ## How It Works
 
-1. Parses HTML and extracts translatable block elements
-2. Groups text into chunks (paragraphs, headings, list items, etc.)
-3. Sends each chunk to Ollama for translation
-4. Replaces each chunk element's content with translated text
-5. Preserves document-level structure and metadata while writing translated content
-6. Saves checkpoint after each chunk for resumability
+### Translation
 
-## Post-Processing to EPUB
+1. Parse the HTML with BeautifulSoup.
+2. Skip non-readable zones such as boilerplate, `<head>`, `<script>`, `<style>`, `<pre>`, and `<code>`.
+3. Extract block chunks such as paragraphs, headings, list items, and table cells.
+4. Translate each chunk with Ollama.
+5. Write translated plain text back into the HTML structure.
 
-```bash
-pandoc translated_book.html -o translated_book.epub --metadata title="Book Title"
-```
+### Audiobook
+
+1. Parse the translated HTML.
+2. Extract the same readable block chunks.
+3. Normalize text for narration.
+4. Generate one WAV file per chunk with Piper.
+5. Concatenate the WAV files into the final audiobook with `ffmpeg`.
+
+## Output Defaults
+
+- Translation output: `{input_stem}_ro.html`
+- Translation checkpoint: `{input_stem}_checkpoint.json`
+- Audiobook output from translated HTML: `{input_stem}.m4b`
+- Audio checkpoint: `{input_stem}_audio_checkpoint.json`
+- Audio segments directory: `{audio_output_stem}_segments/`
+- Heading pauses are inserted as short silent WAV files between chapter/section headings and the following narration.
 
 ## Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run translation
 python3 translate_book.py book.html
+python3 generate_audiobook.py book_ro.html
+python3 book_pipeline.py book.html
 ```
+
+## Docs
+
+- [Requirements](/Users/george/dev/my/translate-guttenber/docs/01_requirments.md)
+- [Development Plan](/Users/george/dev/my/translate-guttenber/docs/02_development_plan.md)
 
 ## License
 

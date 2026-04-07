@@ -1,13 +1,17 @@
 #!/bin/bash
-# Installation script for Book Translation CLI
-# Creates venv, installs dependencies, and sets up global alias
+# Installation script for the book tooling CLIs
+# Creates venv, installs dependencies, and sets up global command symlinks
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASHRC="$HOME/.bashrc"
-ALIAS_NAME="translate-book"
 VENV_DIR="$SCRIPT_DIR/venv"
+
+if [[ "$(basename "$SHELL")" == "zsh" ]]; then
+    RC_FILE="$HOME/.zshrc"
+else
+    RC_FILE="$HOME/.bashrc"
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -15,7 +19,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo "Installing Book Translation CLI..."
+echo "Installing book tooling CLIs..."
 echo ""
 
 # Check if Python 3 is installed
@@ -53,57 +57,34 @@ source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
 pip install -r "$SCRIPT_DIR/requirements.txt"
 echo -e "${GREEN}✓${NC} Dependencies installed"
-
-# Deactivate
 deactivate
 
-# Create wrapper script that activates venv and runs the tool
-# Note: SCRIPT_DIR here is the project directory where venv and translate_book.py live
-PROJECT_DIR="$SCRIPT_DIR"
-WRAPPER_SCRIPT="$PROJECT_DIR/translate-book-wrapper"
-cat > "$WRAPPER_SCRIPT" << WRAPPER_EOF
-#!/bin/bash
-# Wrapper script for translate-book
-# Activates venv and runs the Python script
+chmod +x "$SCRIPT_DIR/translate-book-wrapper"
+chmod +x "$SCRIPT_DIR/generate-audiobook-wrapper"
+chmod +x "$SCRIPT_DIR/book-pipeline-wrapper"
+echo -e "${GREEN}✓${NC} Wrapper scripts are executable"
 
-PROJECT_DIR="$PROJECT_DIR"
-source "\$PROJECT_DIR/venv/bin/activate"
-python3 "\$PROJECT_DIR/translate_book.py" "\$@"
-WRAPPER_EOF
-
-chmod +x "$WRAPPER_SCRIPT"
-echo -e "${GREEN}✓${NC} Wrapper script created"
-
-# Add to PATH via .bashrc if not already there
+# Add to PATH via the active shell rc file if not already there
 INSTALL_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_DIR"
 
-# Create symlink in ~/.local/bin
-if [ -L "$INSTALL_DIR/translate-book" ]; then
-    rm "$INSTALL_DIR/translate-book"
-fi
-ln -s "$WRAPPER_SCRIPT" "$INSTALL_DIR/translate-book"
-echo -e "${GREEN}✓${NC} Symlink created in $INSTALL_DIR/translate-book"
+for CMD in translate-book generate-audiobook book-pipeline; do
+    if [ -L "$INSTALL_DIR/$CMD" ] || [ -f "$INSTALL_DIR/$CMD" ]; then
+        rm -f "$INSTALL_DIR/$CMD"
+    fi
+done
 
-# Check if ~/.local/bin is in PATH
+ln -s "$SCRIPT_DIR/translate-book-wrapper" "$INSTALL_DIR/translate-book"
+ln -s "$SCRIPT_DIR/generate-audiobook-wrapper" "$INSTALL_DIR/generate-audiobook"
+ln -s "$SCRIPT_DIR/book-pipeline-wrapper" "$INSTALL_DIR/book-pipeline"
+echo -e "${GREEN}✓${NC} Symlinks created in $INSTALL_DIR"
+
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "" >> "$BASHRC"
-    echo "# Add ~/.local/bin to PATH" >> "$BASHRC"
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASHRC"
-    echo -e "${GREEN}✓${NC} Added ~/.local/bin to PATH in $BASHRC"
+    echo "" >> "$RC_FILE"
+    echo "# Add ~/.local/bin to PATH" >> "$RC_FILE"
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC_FILE"
+    echo -e "${GREEN}✓${NC} Added ~/.local/bin to PATH in $RC_FILE"
 fi
-
-# Also add an alias for convenience
-if grep -q "alias $ALIAS_NAME=" "$BASHRC" 2>/dev/null; then
-    # Remove old alias
-    sed -i "/alias $ALIAS_NAME=/d" "$BASHRC"
-fi
-
-# Add new alias that points to the wrapper
-echo "" >> "$BASHRC"
-echo "# Book Translation CLI alias" >> "$BASHRC"
-echo "alias $ALIAS_NAME='$INSTALL_DIR/translate-book'" >> "$BASHRC"
-echo -e "${GREEN}✓${NC} Alias added to $BASHRC"
 
 echo ""
 echo "========================================"
@@ -111,13 +92,13 @@ echo -e "${GREEN}Installation complete!${NC}"
 echo ""
 echo -e "${YELLOW}Important:${NC} Run the following to activate:"
 echo ""
-echo "  ${GREEN}source ~/.bashrc${NC}"
+echo "  ${GREEN}source $RC_FILE${NC}"
 echo ""
 echo "Then use from any directory:"
 echo ""
 echo "  ${GREEN}translate-book book.html${NC}"
-echo "  ${GREEN}translate-book book.html --resume${NC}"
-echo "  ${GREEN}translate-book book.html --dry-run${NC}"
+echo "  ${GREEN}generate-audiobook translated_book_ro.html${NC}"
+echo "  ${GREEN}book-pipeline book.html${NC}"
 echo ""
-echo "The tool will use the virtual environment automatically."
+echo "The tools will use the virtual environment automatically."
 echo "========================================"
